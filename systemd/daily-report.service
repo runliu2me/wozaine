@@ -1,0 +1,11 @@
+[Unit]
+Description=我在呢 · 每日对话日报生成
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=__APP_USER__
+WorkingDirectory=__APP_DIR__
+EnvironmentFile=__APP_DIR__/.env
+Environment=COMPANION_DATA_DIR=__APP_DIR__/data
+ExecStart=__APP_DIR__/venv/bin/python3 __APP_DIR__/daily_report.py

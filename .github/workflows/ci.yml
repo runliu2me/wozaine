@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 系统依赖
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libopus0 ffmpeg shellcheck
+      - name: Python 依赖
+        run: pip install -q -r requirements.txt
+      - name: 语法检查
+        run: python -m compileall -q .
+      - name: 静态检查（未用的 import、未定义的名字）
+        run: pip install -q pyflakes && python -m pyflakes *.py tools/ tests/
+      - name: 离线单元测试（不调用任何云服务）
+        run: |
+          python tests/test_typo_book.py
+          python tests/test_safe_next.py
+          python tests/test_device_gate.py
+          python tests/test_bridge_media.py
+          python tests/test_glance.py
+      - name: 安全门禁：网页无内联脚本/样式、开源版无拍照代码
+        run: |
+          python tests/test_web_static.py
+          python tests/test_no_camera.py
+      - name: 网页脚本语法
+        run: for f in web/*.js; do node --check "$f"; done
+      - name: 模块能导入
+        run: python -c "import family, live_context, story, book, deepseek_client, asr_client, tts_client, vad, memory_store, typo_book, env_config, phone_brain, glance, web_auth, device_gate, bridge_media"
+      - name: 安装脚本检查
+        run: |
+          bash -n deploy/install.sh
+          shellcheck -S warning deploy/install.sh deploy/wozaine-restart
+      - name: 不许提交私人文件
+        run: |
+          for f in .env family.json persona.md typo_seed.json; do
+            if git ls-files --error-unmatch "$f" >/dev/null 2>&1; then echo "::error::$f 不应该进仓库"; exit 1; fi
+          done
+          if git ls-files | grep -E '^data/|\.(mp3|wav|jpg|jpeg|bin)$' | grep -v '^docs/images/'; then echo "::error::运行数据、录音、照片或固件不应该进仓库"; exit 1; fi

@@ -1,0 +1,33 @@
+[Unit]
+# 永不因为崩溃太频繁而放弃重启
+StartLimitIntervalSec=0
+Description=我在呢 · 陪聊 全双工语音（WebSocket，可打断，127.0.0.1:3095）
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__APP_USER__
+Group=__APP_USER__
+WorkingDirectory=__APP_DIR__
+EnvironmentFile=__APP_DIR__/.env
+Environment=REALTIME_HOST=127.0.0.1
+Environment=REALTIME_PORT=3095
+Environment=COMPANION_DATA_DIR=__APP_DIR__/data
+ExecStart=__APP_DIR__/venv/bin/python3 -u __APP_DIR__/realtime_server.py
+Restart=always
+RestartSec=3
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=__APP_DIR__/data
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

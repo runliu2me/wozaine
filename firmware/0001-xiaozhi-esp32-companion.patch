@@ -1,0 +1,2745 @@
+From ac49a8ed1479014c967ba311c0c0c112e65bfd11 Mon Sep 17 00:00:00 2001
+From: wozaine contributors <wozaine@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 16:44:52 +0800
+Subject: [PATCH] =?UTF-8?q?companion:=20=E3=80=8C=E6=88=91=E5=9C=A8?=
+ =?UTF-8?q?=E5=91=A2=E3=80=8D=E9=99=AA=E8=81=8A=E5=8A=9F=E8=83=BD=E8=A1=A5?=
+ =?UTF-8?q?=E4=B8=81=EF=BC=88=E5=9F=BA=E4=BA=8E=2078/xiaozhi-esp32=20563a4?=
+ =?UTF-8?q?f0=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Based on xiaozhi-esp32 by 78 (https://github.com/78/xiaozhi-esp32),
+Copyright (c) 2025 Shenzhen Xinzhi Future Technology Co., Ltd.
+Copyright (c) 2025 Project Contributors
+Licensed under the MIT License; the upstream copyright and permission
+notice apply to this patch as well.
+
+- 新增板子 zhengchen-minicam（征辰 Minicam，ESP32-S3 + ES8388 + ST7789；板上摄像头不启用，没有拍照功能）
+- 自定义消息：system/start_intercom、stop_intercom、reboot；
+  conversation/end；设备主动问候 companion/proactive
+- 一拍开始连续对话 / 再拍结束；开机预连音频通道、断线静默重连
+- 自愈：任务看门狗、LVGL 卡死检测、连接卡死/低内存/长时间失联重启、每日凌晨维护重启
+- 崩溃线索（RTC 面包屑）随 OTA 请求上报；连续掉电复位时省电开机并提示检查充电线
+- WiFi 超时不再进入配网热点（有已存 WiFi 时持续重试）；待命时 WiFi 轻度省电
+- OTA 版本检查永不放弃（最长 5 分钟间隔）；版本号可用 XIAOZHI_PROJECT_VER 覆盖
+- 使用本地组件 components/esp-ml307（3.7.2 + 连接/发送超时补丁）
+---
+ CMakeLists.txt                                |   5 +
+ main/CMakeLists.txt                           |  13 +-
+ main/Kconfig.projbuild                        |   5 +-
+ main/application.cc                           | 456 ++++++++++++-
+ main/application.h                            |  40 ++
+ main/audio/audio_codec.h                      |   2 +-
+ main/audio/codecs/es8388_audio_codec.cc       |  20 +-
+ main/boards/common/board.cc                   |   5 +
+ main/boards/common/wifi_board.cc              |  17 +-
+ main/boards/zhengchen-minicam/README.md       |  38 ++
+ main/boards/zhengchen-minicam/config.h        |  74 ++
+ main/boards/zhengchen-minicam/config.json     |  13 +
+ .../zhengchen-minicam/zhengchen_minicam.cc    | 632 ++++++++++++++++++
+ .../zhengchen_minicam_lcd_display.cc          | 615 +++++++++++++++++
+ .../zhengchen_minicam_lcd_display.h           |  77 +++
+ main/crash_info.cc                            |  74 ++
+ main/crash_info.h                             |  15 +
+ main/display/display.h                        |   4 +
+ main/idf_component.yml                        |   2 +-
+ main/main.cc                                  |   3 +
+ main/protocols/protocol.h                     |   2 +
+ main/settings.cc                              |  14 +-
+ 22 files changed, 2075 insertions(+), 51 deletions(-)
+ create mode 100644 main/boards/zhengchen-minicam/README.md
+ create mode 100644 main/boards/zhengchen-minicam/config.h
+ create mode 100644 main/boards/zhengchen-minicam/config.json
+ create mode 100644 main/boards/zhengchen-minicam/zhengchen_minicam.cc
+ create mode 100644 main/boards/zhengchen-minicam/zhengchen_minicam_lcd_display.cc
+ create mode 100644 main/boards/zhengchen-minicam/zhengchen_minicam_lcd_display.h
+ create mode 100644 main/crash_info.cc
+ create mode 100644 main/crash_info.h
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 8ae130c..8148a31 100755
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -10,4 +10,9 @@ include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+ idf_build_set_property(MINIMAL_BUILD ON)
+ 
+ set(PROJECT_VER "2.5.0")
++# 陪聊项目：OTA 升级要求新固件版本号严格大于设备当前版本，否则设备会反复下载同一个包。
++# 出 OTA 包时用环境变量覆盖：XIAOZHI_PROJECT_VER=2.5.1 idf.py -B build-minicam ... build
++if(DEFINED ENV{XIAOZHI_PROJECT_VER})
++    set(PROJECT_VER "$ENV{XIAOZHI_PROJECT_VER}")
++endif()
+ project(xiaozhi)
+diff --git a/main/CMakeLists.txt b/main/CMakeLists.txt
+index 08df008..d893df3 100644
+--- a/main/CMakeLists.txt
++++ b/main/CMakeLists.txt
+@@ -1,5 +1,6 @@
+ # Define source files
+-set(SOURCES "audio/audio_codec.cc"
++set(SOURCES "crash_info.cc"
++            "audio/audio_codec.cc"
+             "audio/audio_debugger.cc"
+             "audio/audio_service.cc"
+             "audio/demuxer/ogg_demuxer.cc"
+@@ -764,6 +765,11 @@ elseif(CONFIG_BOARD_TYPE_ZHENGCHEN_CAM_ML307)
+     set(BUILTIN_TEXT_FONT font_noto_sans_basic_20_4)
+     set(BUILTIN_ICON_FONT font_material_symbols_20_4)
+     set(DEFAULT_EMOJI_COLLECTION noto-color-emoji_64)
++elseif(CONFIG_BOARD_TYPE_ZHENGCHEN_MINICAM)
++    set(BOARD_DIR "zhengchen-minicam")
++    set(BUILTIN_TEXT_FONT font_noto_sans_basic_20_4)
++    set(BUILTIN_ICON_FONT font_material_symbols_20_4)
++    set(DEFAULT_EMOJI_COLLECTION noto-color-emoji_64)
+ elseif(CONFIG_BOARD_TYPE_SPOTPEAR_ESP32_S3_1_54_MUMA)
+     set(BOARD_DIR "spotpear/sp-esp32-s3-1.54-muma")
+     set(BUILTIN_TEXT_FONT font_noto_sans_basic_16_4)
+@@ -1036,7 +1042,8 @@ if(CONFIG_IDF_TARGET_ESP32)
+ endif()
+ 
+ # Include EspVideo if target is ESP32S3 or ESP32P4
+-if(CONFIG_IDF_TARGET_ESP32S3 OR CONFIG_IDF_TARGET_ESP32P4)
++# 陪聊项目：minicam 板不启用摄像头，不编 esp_video（其依赖解析在干净目录下会失败，见 main/idf_component.yml）
++if((CONFIG_IDF_TARGET_ESP32S3 OR CONFIG_IDF_TARGET_ESP32P4) AND NOT CONFIG_BOARD_TYPE_ZHENGCHEN_MINICAM)
+     list(APPEND SOURCES "boards/common/esp_video.cc"
+                         "boards/common/rndis_board.cc"
+                         )
+@@ -1052,7 +1059,7 @@ if(CONFIG_IDF_TARGET_ESP32S3)
+     list(APPEND SOURCES "boards/common/esp32_camera.cc")
+ endif()
+ 
+-set(MAIN_PRIV_REQUIRES_EXTRA "")
++set(MAIN_PRIV_REQUIRES_EXTRA "esp-ml307")  # 陪聊项目：本地组件 components/esp-ml307（原 78/esp-ml307）
+ if(BOARD_TYPE STREQUAL "m5stack-stick-s3")
+     list(APPEND MAIN_PRIV_REQUIRES_EXTRA
+         m5stack__m5pm1
+diff --git a/main/Kconfig.projbuild b/main/Kconfig.projbuild
+index 8d5ae70..1cfba1b 100644
+--- a/main/Kconfig.projbuild
++++ b/main/Kconfig.projbuild
+@@ -626,6 +626,9 @@ choice BOARD_TYPE
+     config BOARD_TYPE_ZHENGCHEN_CAM
+         bool "Zhengchen AI Camera Wi-Fi (征辰科技)"
+         depends on IDF_TARGET_ESP32S3
++    config BOARD_TYPE_ZHENGCHEN_MINICAM
++        bool "Zhengchen Minicam Wi-Fi (征辰科技)"
++        depends on IDF_TARGET_ESP32S3
+ endchoice
+ 
+ choice XIAOZHI_NETWORK_TYPE
+@@ -964,7 +967,7 @@ config USE_DEVICE_AEC
+         || BOARD_TYPE_WAVESHARE_ESP32_P4_WIFI6_TOUCH_LCD_7B \
+         || BOARD_TYPE_WAVESHARE_ESP32_P4_WIFI6_TOUCH_LCD_3_4C || BOARD_TYPE_WAVESHARE_ESP32_P4_WIFI6_TOUCH_LCD_4C || BOARD_TYPE_ESP32_S3_LCD_EV_BOARD_2 || BOARD_TYPE_YUNLIAO_S3 \
+         || BOARD_TYPE_WAVESHARE_ESP32_P4_WIFI6_TOUCH_LCD_7 || BOARD_TYPE_WAVESHARE_ESP32_P4_WIFI6_TOUCH_LCD_8 || BOARD_TYPE_WAVESHARE_ESP32_P4_WIFI6_TOUCH_LCD_10_1 \
+-        || BOARD_TYPE_ESP_VOCAT || BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_LCD_3_49 || BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_LCD_3_49_V2 || BOARD_TYPE_WAVESHARE_ESP32_S3_RLCD_4_2 || BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_LCD_1_85B || BOARD_TYPE_ZHENGCHEN_CAM || BOARD_TYPE_ZHENGCHEN_CAM_ML307 \
++        || BOARD_TYPE_ESP_VOCAT || BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_LCD_3_49 || BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_LCD_3_49_V2 || BOARD_TYPE_WAVESHARE_ESP32_S3_RLCD_4_2 || BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_LCD_1_85B || BOARD_TYPE_ZHENGCHEN_CAM || BOARD_TYPE_ZHENGCHEN_CAM_ML307 || BOARD_TYPE_ZHENGCHEN_MINICAM \
+         || BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_LCD_4_3C || BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_LCD_1_54 || BOARD_TYPE_WAVESHARE_ESP32_S3_LCD_0_85 || BOARD_TYPE_AI_VOX3 || BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_AMOLED_1_43C || BOARD_TYPE_ATK_DNESP32S3_BOX3)
+     help
+         To work properly, device-side AEC requires a clean output reference path from the speaker signal and physical acoustic isolation between the microphone and speaker.
+diff --git a/main/application.cc b/main/application.cc
+index f3f4a68..9b9a2b8 100644
+--- a/main/application.cc
++++ b/main/application.cc
+@@ -1,4 +1,5 @@
+ #include "application.h"
++#include "crash_info.h"
+ #include "assets.h"
+ #include "assets/lang_config.h"
+ #include "audio_codec.h"
+@@ -13,6 +14,13 @@
+ 
+ #include <driver/gpio.h>
+ #include <esp_log.h>
++#include <esp_task_wdt.h>
++#include <atomic>
++#include <algorithm>
++#include <esp_timer.h>
++#include <esp_heap_caps.h>
++#include <esp_random.h>
++#include <ctime>
+ #include <arpa/inet.h>
+ #include <cJSON.h>
+ #include <cstring>
+@@ -55,7 +63,13 @@ Application::~Application() {
+     vEventGroupDelete(event_group_);
+ }
+ 
+-bool Application::SetDeviceState(DeviceState state) { return state_machine_.TransitionTo(state); }
++bool Application::SetDeviceState(DeviceState state) {
++    // 陪聊项目：状态变化当面包屑记下来，崩溃后能知道死在哪个状态
++    static const char* names[] = {"unknown","starting","wifi_config","idle","connecting","listening","speaking","notifying","upgrading","activating","audio_testing","fatal"};
++    int i = (int)state; char buf[40]; snprintf(buf, sizeof(buf), "state:%s", (i >= 0 && i < 12) ? names[i] : "?");
++    CrashInfo::Breadcrumb(buf);
++    return state_machine_.TransitionTo(state);
++}
+ 
+ void Application::Initialize() {
+     auto& board = Board::GetInstance();
+@@ -176,6 +190,21 @@ void Application::Run() {
+     // Set the priority of the main task to 10
+     vTaskPrioritySet(nullptr, 10);
+ 
++    // 陪聊项目：把主循环挂到任务看门狗上。主循环每秒都会因为时钟 tick 醒来并喂狗；
++    // 如果它被卡死超过 CONFIG_ESP_TASK_WDT_TIMEOUT_S（60 秒），看门狗触发 panic → 自动重启（Kconfig 上限 60 秒，写 120 会被悄悄重置成默认 5 秒！）。
++    // sdkconfig 里已把 idle 任务从看门狗里摘掉，只盯主循环，避免误杀。
++    if (esp_task_wdt_add(nullptr) == ESP_OK) {
++        ESP_LOGI(TAG, "Main loop subscribed to task watchdog");
++    }
++    {
++        Settings settings("companion", false);
++        proactive_enabled_ = settings.GetInt("proactive", 1) != 0;
++    }
++    if (CrashInfo::ConsecutivePowerResets() >= 2) {
++        // 让家里人也看得懂：屏幕上写一句（设备一旦稳定运行超过 60 秒，下次开机计数就清零，提示也就没了）
++        Schedule([]() { Board::GetInstance().GetDisplay()->ShowNotification("电源不稳，请检查充电线", 15000); });
++    }
++
+     const EventBits_t ALL_EVENTS =
+         MAIN_EVENT_SCHEDULE | MAIN_EVENT_SEND_AUDIO | MAIN_EVENT_WAKE_WORD_DETECTED |
+         MAIN_EVENT_VAD_CHANGE | MAIN_EVENT_CLOCK_TICK | MAIN_EVENT_ERROR |
+@@ -184,22 +213,34 @@ void Application::Run() {
+         MAIN_EVENT_STATE_CHANGED | MAIN_EVENT_PLAYBACK_DRAINED;
+ 
+     while (true) {
++        CrashInfo::Breadcrumb("main:wait");
+         auto bits = xEventGroupWaitBits(event_group_, ALL_EVENTS, pdTRUE, pdFALSE, portMAX_DELAY);
+ 
++        CrashInfo::Breadcrumb("main:dispatch");
+         if (bits & MAIN_EVENT_ERROR) {
++            CrashInfo::Breadcrumb("main:error_alert");
+             if (GetDeviceState() == kDeviceStateNotifying) {
+                 StopNotification();
+             }
+             SetDeviceState(kDeviceStateIdle);
+-            Alert(Lang::Strings::ERROR, last_error_message_.c_str(), "cancel",
+-                  Lang::Sounds::OGG_EXCLAMATION);
++            if (suppress_next_error_alert_) {
++                // 后台静默预连失败：不弹错误、不响"叮"，老人那边什么都不用看到；稍后自动重试
++                suppress_next_error_alert_ = false;
++                ESP_LOGW(TAG, "Background reconnect failed (silent): %s", last_error_message_.c_str());
++                last_error_message_.clear();
++            } else {
++                Alert(Lang::Strings::ERROR, last_error_message_.c_str(), "cancel",
++                      Lang::Sounds::OGG_EXCLAMATION);
++            }
+         }
+ 
+         if (bits & MAIN_EVENT_NETWORK_CONNECTED) {
++            CrashInfo::Breadcrumb("main:net_up");
+             HandleNetworkConnectedEvent();
+         }
+ 
+         if (bits & MAIN_EVENT_NETWORK_DISCONNECTED) {
++            CrashInfo::Breadcrumb("main:net_down_close");
+             HandleNetworkDisconnectedEvent();
+         }
+ 
+@@ -208,6 +249,7 @@ void Application::Run() {
+         }
+ 
+         if (bits & MAIN_EVENT_STATE_CHANGED) {
++            CrashInfo::Breadcrumb("main:state_changed_ui");
+             HandleStateChangedEvent();
+         }
+ 
+@@ -265,6 +307,7 @@ void Application::Run() {
+             std::unique_lock<std::mutex> lock(mutex_);
+             auto tasks = std::move(main_tasks_);
+             lock.unlock();
++            CrashInfo::Breadcrumb("main:scheduled_task");
+             for (auto& task : tasks) {
+                 task();
+             }
+@@ -272,8 +315,21 @@ void Application::Run() {
+ 
+         if (bits & MAIN_EVENT_CLOCK_TICK) {
+             clock_ticks_++;
++            esp_task_wdt_reset();
++            CrashInfo::Breadcrumb("main:selfheal_tick");
++            SelfHealTick();
+             auto display = Board::GetInstance().GetDisplay();
+-            display->UpdateStatusBar();
++            // 陪聊项目：先探一下 LVGL 锁。屏幕线程如果卡死（SPI/DMA 挂住、被饿死），主循环每次更新状态栏
++            // 都会在锁上等 30 秒，两次就被看门狗打死。探不到锁就跳过；连续 3 秒探不到 → 自愈重启
++            if (display->TryProbeLock(1000)) {
++                lvgl_lock_failures_ = 0;
++                CrashInfo::Breadcrumb("main:status_bar");
++                display->UpdateStatusBar();
++            } else if (++lvgl_lock_failures_ >= 3) {
++                CrashInfo::Breadcrumb("selfheal:lvgl_stuck_reboot");
++                ESP_LOGE(TAG, "LVGL lock unavailable for 3s, rebooting");
++                Reboot();
++            }
+ 
+             // Print debug info every 10 seconds
+             if (clock_ticks_ % 10 == 0) {
+@@ -304,7 +360,7 @@ void Application::HandleNetworkConnectedEvent() {
+                 app->activation_task_handle_ = nullptr;
+                 vTaskDelete(NULL);
+             },
+-            "activation", 4096 * 2, this, 2, &activation_task_handle_);
++            "activation", 4096 * 4, this, 2, &activation_task_handle_);  // 陪聊项目：任务里要做 TLS 握手 + 拼 JSON，8K 栈偶发溢出（升级后首次开机 panic → 回滚），加大到 16K
+     }
+ 
+     // Update the status bar immediately to show the network state
+@@ -318,8 +374,11 @@ void Application::HandleNetworkDisconnectedEvent() {
+     if (state == kDeviceStateNotifying) {
+         StopNotification();
+     }
+-    if (state == kDeviceStateConnecting || state == kDeviceStateListening ||
+-        state == kDeviceStateSpeaking) {
++    if (connecting_) {
++        // 连接任务正在用 websocket 对象，这时销毁它会踩到已释放内存；让它自己超时失败即可
++        ESP_LOGW(TAG, "Network dropped while connecting; leaving the connect task to time out");
++    } else if (protocol_ && (state == kDeviceStateConnecting || state == kDeviceStateListening ||
++        state == kDeviceStateSpeaking)) {
+         ESP_LOGI(TAG, "Closing audio channel due to network disconnection");
+         protocol_->CloseAudioChannel();
+     }
+@@ -358,6 +417,9 @@ void Application::HandleActivationDoneEvent() {
+             // Play the success sound to indicate the device is ready
+             audio_service_.PlaySound(Lang::Sounds::OGG_SUCCESS);
+         });
++        // 陪聊项目：开机后就把音频通道提前连好，避免第一次按按钮时
++        // 现连（约1秒）吃掉用户刚说的话，导致"按住说话没反应"
++        Schedule([this]() { PrewarmAudioChannel(); });
+     }
+ }
+ 
+@@ -366,6 +428,7 @@ void Application::ActivationTask() {
+     ota_ = std::make_unique<Ota>();
+ 
+     // Check for new assets version
++    CrashInfo::Breadcrumb("activation:check_assets");
+     CheckAssetsVersion();
+ 
+     // Check for new firmware version
+@@ -439,7 +502,10 @@ void Application::CheckAssetsVersion() {
+ }
+ 
+ void Application::CheckNewVersion() {
+-    const int MAX_RETRY = 10;
++    // 陪聊项目：原版重试 10 次（约 85 分钟）就放弃，之后设备再也连不上服务器、按按钮永远报错，
++    // 只能靠重启。这里改成永不放弃：间隔最长 5 分钟，一直试到服务器回来；
++    // 同时 SelfHealTick 会在太久联系不上时自动重启一次，覆盖 WiFi 驱动卡死之类的情况。
++    const int MAX_RETRY_DELAY = 300;
+     int retry_count = 0;
+     int retry_delay = 10;  // Initial retry delay in seconds
+ 
+@@ -448,13 +514,11 @@ void Application::CheckNewVersion() {
+         auto display = board.GetDisplay();
+         display->SetStatus(Lang::Strings::CHECKING_NEW_VERSION);
+ 
++        CrashInfo::Breadcrumb("activation:check_version");
+         auto check = ota_->CheckVersion();
++        CrashInfo::Breadcrumb(check ? "activation:check_ok" : "activation:check_failed");
+         if (!check) {
+             retry_count++;
+-            if (retry_count >= MAX_RETRY) {
+-                ESP_LOGE(TAG, "Too many retries, exit version check");
+-                return;
+-            }
+ 
+             const auto& err = check.error();
+             char error_message[160];
+@@ -473,21 +537,28 @@ void Application::CheckNewVersion() {
+                 alert_message_length >= static_cast<int>(sizeof(buffer))) {
+                 snprintf(buffer, sizeof(buffer), "%s", err.Message());
+             }
+-            Alert(Lang::Strings::ERROR, buffer, "cloud_off", Lang::Sounds::OGG_EXCLAMATION);
++            // 刚开机时 WiFi 刚连上、DNS/TLS 还没就绪，头一两次检查失败很常见，几秒后重试就好了。
++            // 这种情况不要把"检查新版本失败"甩到屏幕上吓人：前两次只显示"正在连接"，第三次起才提示（不响铃）。
++            if (retry_count <= 2) {
++                display->SetStatus("正在连接…");
++            } else {
++                Alert(Lang::Strings::ERROR, buffer, "cloud_off", "");
++            }
+ 
+-            ESP_LOGW(TAG, "Check new version failed, retry in %d seconds (%d/%d)", retry_delay,
+-                     retry_count, MAX_RETRY);
++            ESP_LOGW(TAG, "Check new version failed, retry in %d seconds (attempt %d)", retry_delay,
++                     retry_count);
+             for (int i = 0; i < retry_delay; i++) {
+                 vTaskDelay(pdMS_TO_TICKS(1000));
+                 if (GetDeviceState() == kDeviceStateIdle) {
+                     break;
+                 }
+             }
+-            retry_delay *= 2;  // Double the retry delay
++            retry_delay = std::min(retry_delay * 2, MAX_RETRY_DELAY);
+             continue;
+         }
+         retry_count = 0;
+         retry_delay = 10;  // Reset retry delay
++        NoteServerContact();
+ 
+         if (ota_->HasNewVersion()) {
+             if (UpgradeFirmware(ota_->GetFirmwareUrl(), ota_->GetFirmwareVersion())) {
+@@ -538,6 +609,10 @@ void Application::InitializeProtocol() {
+         protocol_ = std::make_unique<MqttProtocol>();
+     } else if (ota_->HasWebsocketConfig()) {
+         protocol_ = std::make_unique<WebsocketProtocol>();
++    } else if (!Settings("websocket", false).GetString("url").empty()) {
++        // 陪聊项目：OTA 没返回配置（比如这次没连上服务器），但 NVS 里存着上次的 WebSocket 地址，直接用它
++        ESP_LOGW(TAG, "No protocol in OTA config, falling back to saved websocket url");
++        protocol_ = std::make_unique<WebsocketProtocol>();
+     } else {
+         ESP_LOGW(TAG, "No protocol specified in the OTA config, using MQTT");
+         protocol_ = std::make_unique<MqttProtocol>();
+@@ -551,12 +626,19 @@ void Application::InitializeProtocol() {
+     });
+ 
+     protocol_->OnIncomingAudio([this](std::unique_ptr<AudioStreamPacket> packet) {
++        NoteServerContact();
+         if (GetDeviceState() == kDeviceStateSpeaking) {
+             audio_service_.PushPacketToDecodeQueue(std::move(packet));
+         }
+     });
+ 
+     protocol_->OnAudioChannelOpened([this, codec, &board]() {
++        NoteServerContact();
++        prewarm_backoff_s_ = 30;
++        if (pending_proactive_notice_) {
++            pending_proactive_notice_ = false;
++            protocol_->SendCustomText("{\"type\":\"companion\",\"event\":\"proactive\"}");
++        }
+         board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
+         if (protocol_->server_sample_rate() != codec->output_sample_rate()) {
+             ESP_LOGW(TAG,
+@@ -569,13 +651,25 @@ void Application::InitializeProtocol() {
+     protocol_->OnAudioChannelClosed([this, &board]() {
+         board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
+         Schedule([this]() {
++            // 陪聊项目：OpenAudioChannel 新建 socket 时会先销毁旧 socket，旧 socket 的"断开"回调
++            // 也会走到这里。如果此时新通道已经建好（正在对话），绝不能把状态打回待命——
++            // 否则刚开始的对话会被莫名其妙掐断。
++            if (protocol_ && protocol_->IsAudioChannelOpened()) {
++                ESP_LOGI(TAG, "Ignoring stale channel-closed event (new channel is open)");
++                return;
++            }
+             auto display = Board::GetInstance().GetDisplay();
+             display->SetChatMessage("system", "");
+             SetDeviceState(kDeviceStateIdle);
++            // 通道可能是被反向代理的空闲超时之类的原因意外断开的（不是用户主动挂断），
++            // 这里在后台静默重连，避免下次按按钮时又要现连一次，重演"按住说话没反应"的竞态。
++            // 失败不弹错误，SelfHealTick 会按退避间隔一直重试。
++            PrewarmAudioChannelQuiet();
+         });
+     });
+ 
+     protocol_->OnIncomingJson([this, display](const cJSON* root) {
++        NoteServerContact();
+         // Parse JSON data
+         auto type = cJSON_GetObjectItem(root, "type");
+         if (!cJSON_IsString(type)) {
+@@ -651,6 +745,52 @@ void Application::InitializeProtocol() {
+                     });
+                 }
+             }
++        } else if (strcmp(type->valuestring, "system") == 0) {
++            // 陪聊项目：管理页面远程控制
++            //  reboot          重启（配合 OTA）
++            //  start_intercom  进入"对讲"：Realtime 模式，麦克风一直开着传给服务器；服务器发 tts start 后
++            //                  设备一边放手机那头的声音一边继续收音（靠设备端 AEC），就是双工电话
++            //  stop_intercom   退出对讲，回到待命
++            auto command = cJSON_GetObjectItem(root, "command");
++            if (cJSON_IsString(command) && strcmp(command->valuestring, "reboot") == 0) {
++                Schedule([this]() { Reboot(); });
++            } else if (cJSON_IsString(command) && strcmp(command->valuestring, "start_intercom") == 0) {
++                Schedule([this]() {
++                    DismissAlert();
++                    auto state = GetDeviceState();
++                    if (state == kDeviceStateNotifying) {
++                        StopNotification();
++                        state = kDeviceStateIdle;
++                    }
++                    if (!protocol_) {
++                        return;
++                    }
++                    if (state == kDeviceStateSpeaking) {
++                        AbortSpeaking(kAbortReasonNone);
++                        SetListeningMode(kListeningModeRealtime);
++                    } else if (state == kDeviceStateIdle || state == kDeviceStateListening) {
++                        if (!protocol_->IsAudioChannelOpened()) {
++                            SetDeviceState(kDeviceStateConnecting);
++                            Schedule([this]() { ContinueOpenAudioChannel(kListeningModeRealtime); });
++                            return;
++                        }
++                        SetListeningMode(kListeningModeRealtime);
++                    }
++                });
++            } else if (cJSON_IsString(command) && strcmp(command->valuestring, "stop_intercom") == 0) {
++                Schedule([this]() {
++                    if (GetDeviceState() == kDeviceStateSpeaking) {
++                        AbortSpeaking(kAbortReasonNone);
++                    }
++                    StopListening();
++                });
++            }
++        } else if (strcmp(type->valuestring, "conversation") == 0) {
++            // 陪聊项目：服务器判定对话结束（比如长时间没人说话）→ 回到待命
++            auto state = cJSON_GetObjectItem(root, "state");
++            if (cJSON_IsString(state) && strcmp(state->valuestring, "end") == 0) {
++                StopListening();
++            }
+         } else if (strcmp(type->valuestring, "stt") == 0) {
+             auto text = cJSON_GetObjectItem(root, "text");
+             if (cJSON_IsString(text)) {
+@@ -772,6 +912,55 @@ void Application::StartListening() { xEventGroupSetBits(event_group_, MAIN_EVENT
+ 
+ void Application::StopListening() { xEventGroupSetBits(event_group_, MAIN_EVENT_STOP_LISTENING); }
+ 
++void Application::StopConversation() {
++    CrashInfo::Breadcrumb("tap:stop_conversation");
++    Schedule([this]() {
++        auto state = GetDeviceState();
++        if (state == kDeviceStateSpeaking) {
++            AbortSpeaking(kAbortReasonNone);   // 立刻闭嘴、清掉还没放的音频
++        }
++        if (state == kDeviceStateSpeaking || state == kDeviceStateListening) {
++            if (protocol_) {
++                protocol_->SendStopListening();  // 服务器收到后结束这轮对话（conversation_active=false）
++            }
++        }
++        // Connecting：直接回待命，连接完成的回调看到状态不是 Connecting 就不会再进入聆听
++        SetDeviceState(kDeviceStateIdle);
++    });
++}
++
++void Application::StartConversation() {
++    CrashInfo::Breadcrumb("tap:start_conversation");
++    // 和 HandleStartListeningEvent 一样的流程，只是用 kListeningModeAutoStop：
++    // 设备把音频一直流给服务器、由服务器断句；tts stop 之后自动回到 Listening（见 tts 消息处理），
++    // 直到用户再拍一下（StopListening）或服务器发 conversation/end。
++    Schedule([this]() {
++        // 用户拍了按钮 = 之前的报错（比如 WiFi 连不上服务器）可以撤了。
++        // 不撤的话 last_error_message_ 一直非空，回到待命时 idle 分支会跳过
++        // ClearChatMessages()，屏幕底下的字幕就一直留着
++        DismissAlert();
++        auto state = GetDeviceState();
++        if (state == kDeviceStateNotifying) {
++            StopNotification();
++            state = kDeviceStateIdle;
++        }
++        if (!protocol_) {
++            return;
++        }
++        if (state == kDeviceStateIdle) {
++            if (!protocol_->IsAudioChannelOpened()) {
++                SetDeviceState(kDeviceStateConnecting);
++                Schedule([this]() { ContinueOpenAudioChannel(kListeningModeAutoStop); });
++                return;
++            }
++            SetListeningMode(kListeningModeAutoStop);
++        } else if (state == kDeviceStateSpeaking) {
++            AbortSpeaking(kAbortReasonNone);
++            SetListeningMode(kListeningModeAutoStop);
++        }
++    });
++}
++
+ void Application::HandleToggleChatEvent() {
+     auto state = GetDeviceState();
+ 
+@@ -825,17 +1014,229 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
+     board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
+ 
+     if (!protocol_->IsAudioChannelOpened()) {
+-        if (!protocol_->OpenAudioChannel()) {
+-            // Return to idle so the device is not stuck in the connecting
+-            // state (not every failure path reports a network error)
+-            SetDeviceState(kDeviceStateIdle);
+-            return;
+-        }
++        OpenAudioChannelAsync([this, mode](bool ok) {
++            if (GetDeviceState() != kDeviceStateConnecting) {
++                return;  // 连接期间用户又拍了一下 / 状态变了
++            }
++            if (!ok) {
++                // Return to idle so the device is not stuck in the connecting state
++                SetDeviceState(kDeviceStateIdle);
++                return;
++            }
++            SetListeningMode(mode);
++        });
++        return;
+     }
+ 
+     SetListeningMode(mode);
+ }
+ 
++void Application::OpenAudioChannelAsync(std::function<void(bool)> done) {
++    if (!protocol_) {
++        done(false);
++        return;
++    }
++    if (connecting_) {
++        // 已经有一次连接在进行（比如后台预连）：排队等它的结果，别丢掉这次请求
++        connect_waiters_.push_back(std::move(done));
++        return;
++    }
++    connecting_ = true;
++    connecting_since_us_ = esp_timer_get_time();
++    connect_waiters_.push_back(std::move(done));
++    xTaskCreate([](void* arg) {
++        auto* app = static_cast<Application*>(arg);
++        bool ok = app->protocol_ ? app->protocol_->OpenAudioChannel() : false;
++        app->Schedule([app, ok]() {
++            app->connecting_ = false;
++            auto waiters = std::move(app->connect_waiters_);
++            app->connect_waiters_.clear();
++            for (auto& w : waiters) {
++                w(ok);
++            }
++        });
++        vTaskDelete(NULL);
++    }, "open_channel", 16384, this, 5, nullptr);   // TLS 握手在这个任务里，8K 会溢出
++}
++
++void Application::PrewarmAudioChannel() {
++    if (!protocol_ || protocol_->IsAudioChannelOpened()) {
++        return;
++    }
++    if (GetDeviceState() != kDeviceStateIdle) {
++        return;
++    }
++    PrewarmAudioChannelQuiet();
++}
++
++// 后台静默版：失败不弹错误、不响提示音（错误事件会在下一轮主循环被 suppress 掉）
++void Application::PrewarmAudioChannelQuiet() {
++    if (!protocol_ || protocol_->IsAudioChannelOpened() || GetDeviceState() != kDeviceStateIdle) {
++        return;
++    }
++    if (connecting_) {
++        return;
++    }
++    last_prewarm_attempt_us_ = esp_timer_get_time();
++    suppress_next_error_alert_ = true;
++    CrashInfo::Breadcrumb("prewarm_quiet:open_channel");
++    OpenAudioChannelAsync([this](bool ok) {
++        if (ok) {
++            suppress_next_error_alert_ = false;
++            prewarm_backoff_s_ = 30;
++        } else {
++            prewarm_backoff_s_ = std::min(prewarm_backoff_s_ * 2, 300);
++        }
++    });
++}
++
++void Application::SetProactiveEnabled(bool enabled) {
++    proactive_enabled_ = enabled;
++    Settings settings("companion", true);
++    settings.SetInt("proactive", enabled ? 1 : 0);
++    ESP_LOGI(TAG, "Proactive check-in %s", enabled ? "enabled" : "disabled");
++}
++
++// 白天（北京时间 10:00–21:00）随机 6–7 次主动开口问候，然后进入连续对话；
++// 对方不回应的话服务器 90 秒自动收掉。日程按天生成：把 11 小时切成 N 段，每段里随机挑一个时刻，天然拉开间隔。
++void Application::ProactiveTick(int64_t now_us) {
++    if (!proactive_enabled_ || !has_server_time_ || !protocol_) {
++        return;
++    }
++    time_t t = time(nullptr);  // OTA 已把系统时间设成北京时间（服务器 timezone_offset=480），这里不能再加 8 小时
++    struct tm tmv;
++    gmtime_r(&t, &tmv);
++    if (tmv.tm_yday != proactive_day_) {
++        proactive_day_ = tmv.tm_yday;
++        proactive_count_ = 6 + (esp_random() % 2);   // 每天 6-7 次
++        const int start = 10 * 60, span = 11 * 60;  // 10:00 起，共 11 小时
++        int slot = span / proactive_count_;
++        for (int i = 0; i < proactive_count_; i++) {
++            proactive_times_[i] = start + i * slot + (int)(esp_random() % slot);
++        }
++        // 开机时已经过了的时间点直接跳过
++        int now_min = tmv.tm_hour * 60 + tmv.tm_min;
++        proactive_next_ = 0;
++        while (proactive_next_ < proactive_count_ && proactive_times_[proactive_next_] <= now_min) {
++            proactive_next_++;
++        }
++        ESP_LOGI(TAG, "Proactive schedule: %d calls today, %d still to go", proactive_count_, proactive_count_ - proactive_next_);
++    }
++    if (proactive_next_ >= proactive_count_) {
++        return;
++    }
++    int now_min = tmv.tm_hour * 60 + tmv.tm_min;
++    if (now_min < proactive_times_[proactive_next_] || now_min >= 21 * 60) {
++        return;
++    }
++    // 到点了：只在待命且已经安静 2 分钟以上时开口（刚聊完不要马上又喊）
++    if (GetDeviceState() != kDeviceStateIdle || idle_since_us_ == 0 || now_us - idle_since_us_ < 2LL * 60 * 1000000) {
++        return;
++    }
++    proactive_next_++;
++    StartProactiveCall();
++}
++
++void Application::StartProactiveCall() {
++    if (!protocol_) {
++        return;
++    }
++    if (!protocol_->IsAudioChannelOpened() && connecting_) {
++        ESP_LOGW(TAG, "Proactive call skipped: still connecting");
++        return;
++    }
++    ESP_LOGI(TAG, "Proactive check-in: starting proactive greeting");
++    CrashInfo::Breadcrumb("proactive_call");
++    // 先告诉服务器"这次是我主动喊的"，它会用主动问候的开场白，而不是被唤起时的应答。
++    // 通道还没开就先记着，等 OnAudioChannelOpened 时再发
++    if (protocol_->IsAudioChannelOpened()) {
++        protocol_->SendCustomText("{\"type\":\"companion\",\"event\":\"proactive\"}");
++    } else {
++        pending_proactive_notice_ = true;
++    }
++    StartConversation();
++}
++
++void Application::NoteServerContact() {
++    last_server_contact_us_ = esp_timer_get_time();
++}
++
++// 每秒由主循环调用一次
++void Application::SelfHealTick() {
++    const int64_t now = esp_timer_get_time();
++    const auto state = GetDeviceState();
++
++    if (state == kDeviceStateIdle) {
++        if (idle_since_us_ == 0) {
++            idle_since_us_ = now;
++        }
++    } else {
++        idle_since_us_ = 0;
++    }
++
++    // 1) 待命时通道不在（服务器重启、代理超时、连不上……）→ 按退避间隔静默重连
++    if (state == kDeviceStateIdle && protocol_ && !protocol_->IsAudioChannelOpened() &&
++        now - last_prewarm_attempt_us_ > (int64_t)prewarm_backoff_s_ * 1000000) {
++        Schedule([this]() { PrewarmAudioChannelQuiet(); });
++    }
++
++    // 1.5) 连接任务卡死（理论上有 12s+10s+10s 的上限，这里再兜一层）→ 重启
++    if (connecting_ && now - connecting_since_us_ > 90LL * 1000000) {
++        CrashInfo::Breadcrumb("selfheal:connect_stuck_reboot");
++        ESP_LOGE(TAG, "Connect task stuck for 90s, rebooting");
++        Reboot();
++        return;
++    }
++    // 1.6) 内存快耗尽（内部 RAM 空闲 < 40KB 持续 60 秒，且空闲）→ 重启，别等到分配失败 abort
++    {
++        size_t free_internal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
++        if (free_internal < 40 * 1024) {
++            if (low_heap_since_us_ == 0) low_heap_since_us_ = now;
++            if (state == kDeviceStateIdle && now - low_heap_since_us_ > 60LL * 1000000) {
++                CrashInfo::Breadcrumb("selfheal:low_heap_reboot");
++                ESP_LOGE(TAG, "Internal heap low (%u bytes) for 60s, rebooting", (unsigned)free_internal);
++                Reboot();
++                return;
++            }
++        } else {
++            low_heap_since_us_ = 0;
++        }
++    }
++
++    // 2) 太久没和服务器说上话（开机起算）→ 重启。WiFi 驱动卡死、协议栈进入奇怪状态等都靠这一招兜底。
++    //    正在升级固件时不重启。
++    if (state != kDeviceStateUpgrading && now - last_server_contact_us_ > kNoContactRebootUs) {
++        CrashInfo::Breadcrumb("selfheal:no_contact_reboot");
++        ESP_LOGE(TAG, "No server contact for %lld minutes, rebooting to self-heal",
++                 (long long)((now - last_server_contact_us_) / 60000000));
++        Reboot();
++        return;
++    }
++
++    // 2.5) 白天主动问候
++    ProactiveTick(now);
++
++    // 3) 每天北京时间凌晨 4 点、设备空闲超过 10 分钟、已运行超过 20 小时 → 例行重启，清掉慢性问题。
++    //    没拿到服务器时间就按运行满 36 小时算。
++    if (state == kDeviceStateIdle && idle_since_us_ != 0 && now - idle_since_us_ > 10LL * 60 * 1000000 &&
++        now > kDailyRebootMinUptimeUs) {
++        bool due = false;
++        if (has_server_time_) {
++            time_t t = time(nullptr);  // OTA 已把系统时间设成北京时间（服务器 timezone_offset=480），这里不能再加 8 小时
++            struct tm tmv;
++            gmtime_r(&t, &tmv);
++            due = (tmv.tm_hour == kDailyRebootHourBeijing);
++        } else {
++            due = now > 36LL * 3600 * 1000000;
++        }
++        if (due) {
++            CrashInfo::Breadcrumb("daily_maintenance_reboot");
++            ESP_LOGI(TAG, "Scheduled maintenance reboot");
++            Reboot();
++        }
++    }
++}
++
+ void Application::HandleStartListeningEvent() {
+     auto state = GetDeviceState();
+ 
+@@ -1189,11 +1590,13 @@ void Application::Reboot() {
+     if (GetDeviceState() == kDeviceStateNotifying) {
+         StopNotification();
+     }
+-    // Disconnect the audio channel
+-    if (protocol_ && protocol_->IsAudioChannelOpened()) {
+-        protocol_->CloseAudioChannel();
++    // Disconnect the audio channel（连接任务还在跑的时候不能销毁 protocol_，直接重启就行）
++    if (!connecting_) {
++        if (protocol_ && protocol_->IsAudioChannelOpened()) {
++            protocol_->CloseAudioChannel();
++        }
++        protocol_.reset();
+     }
+-    protocol_.reset();
+     audio_service_.Stop();
+ 
+     vTaskDelay(pdMS_TO_TICKS(1000));
+@@ -1232,6 +1635,7 @@ bool Application::UpgradeFirmware(const std::string& url, const std::string& ver
+     vTaskDelay(pdMS_TO_TICKS(1000));
+ 
+     bool upgrade_success = Ota::Upgrade(upgrade_url, [this, display](int progress, size_t speed) {
++        esp_task_wdt_reset();  // 下载可能在主任务里跑，别让看门狗误杀
+         char buffer[32];
+         snprintf(buffer, sizeof(buffer), "%d%% %uKB/s", progress, speed / 1024);
+         Schedule([display, message = std::string(buffer)]() {
+diff --git a/main/application.h b/main/application.h
+index f2b9a00..3f3e10d 100644
+--- a/main/application.h
++++ b/main/application.h
+@@ -101,6 +101,13 @@ public:
+      * Sends MAIN_EVENT_START_LISTENING to be handled in Run()
+      */
+     void StartListening();
++    // 陪聊项目：拍一下就进入"连续对话"——auto 模式（服务器做断句），回复完自动回到聆听
++    void StartConversation();
++    // 陪聊项目：对话进行中（连接中/聆听/说话）再拍一下 = 整个对话立刻停下、回到待命
++    void StopConversation();
++    // 陪聊项目：主动问候（白天随机几次主动开口），开关存 NVS，设备菜单里可切
++    bool IsProactiveEnabled() const { return proactive_enabled_; }
++    void SetProactiveEnabled(bool enabled);
+ 
+     /**
+      * Stop listening (event-based, thread-safe)
+@@ -154,6 +161,29 @@ private:
+     int clock_ticks_ = 0;
+     TaskHandle_t activation_task_handle_ = nullptr;
+ 
++    // 陪聊项目：自愈看门狗（设备放在老人家里，没人会去按复位）
++    //  - last_server_contact_us_: 最近一次和服务器"真的说上话"的时间（OTA 检查成功 / 通道建立 / 收到消息）
++    //  - 太久没联系上：先反复静默重连；超过 kNoContactRebootUs 直接重启
++    //  - 每天凌晨设备空闲时重启一次，清掉任何慢性泄漏
++    int64_t last_server_contact_us_ = 0;
++    int64_t last_prewarm_attempt_us_ = 0;
++    int prewarm_backoff_s_ = 30;
++    bool suppress_next_error_alert_ = false;
++    int64_t idle_since_us_ = 0;
++    static constexpr int64_t kNoContactRebootUs = 2LL * 3600 * 1000000;   // 2 小时
++    static constexpr int64_t kDailyRebootMinUptimeUs = 20LL * 3600 * 1000000;  // 至少运行 20 小时
++    static constexpr int kDailyRebootHourBeijing = 4;
++    void NoteServerContact();
++    void SelfHealTick();
++    // 主动问候的日程：每天在 10:00–21:00 之间随机 5–6 个时间点（分钟数），按天重新生成
++    bool proactive_enabled_ = true;
++    int proactive_day_ = -1;
++    int proactive_times_[8] = {0};
++    int proactive_count_ = 0;
++    int proactive_next_ = 0;
++    void ProactiveTick(int64_t now_us);
++    void StartProactiveCall();
++
+ 
+     // Event handlers
+     void HandleStateChangedEvent();
+@@ -165,6 +195,16 @@ private:
+     void HandleActivationDoneEvent();
+     void HandleWakeWordDetectedEvent();
+     void ContinueOpenAudioChannel(ListeningMode mode);
++    void PrewarmAudioChannel();
++    void PrewarmAudioChannelQuiet();
++    // 在独立任务里建连接，不卡主循环（主循环挂着任务看门狗）；done 在主循环里回调
++    void OpenAudioChannelAsync(std::function<void(bool)> done);
++    bool connecting_ = false;
++    int64_t connecting_since_us_ = 0;
++    std::vector<std::function<void(bool)>> connect_waiters_;
++    int64_t low_heap_since_us_ = 0;
++    int lvgl_lock_failures_ = 0;
++    bool pending_proactive_notice_ = false;
+     void BeginWakeWordInvoke(const std::string& wake_word);
+     void ContinueWakeWordInvoke(const std::string& wake_word);
+     void StartListeningAudio();
+diff --git a/main/audio/audio_codec.h b/main/audio/audio_codec.h
+index a267dbb..ed20c02 100644
+--- a/main/audio/audio_codec.h
++++ b/main/audio/audio_codec.h
+@@ -61,7 +61,7 @@ protected:
+     int output_sample_rate_ = 0;
+     int input_channels_ = 1;
+     int output_channels_ = 1;
+-    int output_volume_ = 70;
++    int output_volume_ = 100;  // 陪聊项目：默认开到最大音量，方便老人听清楚
+     float input_gain_ = 0.0;
+ 
+     virtual int Read(int16_t* dest, int samples) = 0;
+diff --git a/main/audio/codecs/es8388_audio_codec.cc b/main/audio/codecs/es8388_audio_codec.cc
+index c1db3c9..4d6b5f7 100644
+--- a/main/audio/codecs/es8388_audio_codec.cc
++++ b/main/audio/codecs/es8388_audio_codec.cc
+@@ -71,9 +71,9 @@ Es8388AudioCodec::Es8388AudioCodec(void* i2c_master_handle, i2c_port_t i2c_port,
+ }
+ 
+ Es8388AudioCodec::~Es8388AudioCodec() {
+-    ESP_ERROR_CHECK(esp_codec_dev_close(output_dev_));
++    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_codec_dev_close(output_dev_));
+     esp_codec_dev_delete(output_dev_);
+-    ESP_ERROR_CHECK(esp_codec_dev_close(input_dev_));
++    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_codec_dev_close(input_dev_));
+     esp_codec_dev_delete(input_dev_);
+ 
+     audio_codec_delete_codec_if(codec_if_);
+@@ -137,7 +137,7 @@ void Es8388AudioCodec::CreateDuplexChannels(gpio_num_t mclk, gpio_num_t bclk, gp
+ }
+ 
+ void Es8388AudioCodec::SetOutputVolume(int volume) {
+-    ESP_ERROR_CHECK(esp_codec_dev_set_out_vol(output_dev_, volume));
++    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_codec_dev_set_out_vol(output_dev_, volume));
+     AudioCodec::SetOutputVolume(volume);
+ }
+ 
+@@ -157,15 +157,15 @@ void Es8388AudioCodec::EnableInput(bool enable) {
+         if (input_reference_) {
+             fs.channel_mask |= ESP_CODEC_DEV_MAKE_CHANNEL_MASK(1);
+         }
+-        ESP_ERROR_CHECK(esp_codec_dev_open(input_dev_, &fs));
++        ESP_ERROR_CHECK_WITHOUT_ABORT(esp_codec_dev_open(input_dev_, &fs));
+         if (input_reference_) {
+             uint8_t gain = (11 << 4) + 0;
+             ctrl_if_->write_reg(ctrl_if_, 0x09, 1, &gain, 1);
+         }else{
+-            ESP_ERROR_CHECK(esp_codec_dev_set_in_gain(input_dev_, input_gain_));
++            ESP_ERROR_CHECK_WITHOUT_ABORT(esp_codec_dev_set_in_gain(input_dev_, input_gain_));
+         }
+     } else {
+-        ESP_ERROR_CHECK(esp_codec_dev_close(input_dev_));
++        ESP_ERROR_CHECK_WITHOUT_ABORT(esp_codec_dev_close(input_dev_));
+     }
+     AudioCodec::EnableInput(enable);
+ }
+@@ -184,10 +184,10 @@ void Es8388AudioCodec::EnableOutput(bool enable) {
+                 .sample_rate = (uint32_t)output_sample_rate_,
+                 .mclk_multiple = 0,
+             };
+-            ESP_ERROR_CHECK(esp_codec_dev_open(output_dev_, &fs));
++            ESP_ERROR_CHECK_WITHOUT_ABORT(esp_codec_dev_open(output_dev_, &fs));
+             output_device_opened_ = true;
+         }
+-        ESP_ERROR_CHECK(esp_codec_dev_set_out_vol(output_dev_, output_volume_));
++        ESP_ERROR_CHECK_WITHOUT_ABORT(esp_codec_dev_set_out_vol(output_dev_, output_volume_));
+ 
+         // Set analog output volume to 0dB, default is -45dB
+         uint8_t reg_val = 30; // 0dB
+@@ -196,7 +196,7 @@ void Es8388AudioCodec::EnableOutput(bool enable) {
+             ctrl_if_->write_reg(ctrl_if_, reg, 1, &reg_val, 1);
+         }
+ 
+-        ESP_ERROR_CHECK(esp_codec_dev_set_out_mute(output_dev_, false));
++        ESP_ERROR_CHECK_WITHOUT_ABORT(esp_codec_dev_set_out_mute(output_dev_, false));
+         if (pa_pin_ != GPIO_NUM_NC) {
+             gpio_set_level(pa_pin_, 1);
+         }
+@@ -205,7 +205,7 @@ void Es8388AudioCodec::EnableOutput(bool enable) {
+         // source. Reopening the shared duplex interface after WiFi provisioning
+         // can otherwise leave playback silent on ESP-IDF 6.
+         if (output_device_opened_) {
+-            ESP_ERROR_CHECK(esp_codec_dev_set_out_mute(output_dev_, true));
++            ESP_ERROR_CHECK_WITHOUT_ABORT(esp_codec_dev_set_out_mute(output_dev_, true));
+         }
+         if (pa_pin_ != GPIO_NUM_NC) {
+             gpio_set_level(pa_pin_, 0);
+diff --git a/main/boards/common/board.cc b/main/boards/common/board.cc
+index e0880dc..a5b1ed4 100644
+--- a/main/boards/common/board.cc
++++ b/main/boards/common/board.cc
+@@ -3,6 +3,7 @@
+ #include "display/display.h"
+ #include "settings.h"
+ #include "system_info.h"
++#include "crash_info.h"
+ 
+ #include <esp_chip_info.h>
+ #include <esp_log.h>
+@@ -121,6 +122,10 @@ std::string Board::GetSystemInfoJson() {
+     json += R"("compile_time":")" + std::string(app_desc->date) + R"(T)" +
+             std::string(app_desc->time) + R"(Z",)";
+     json += R"("idf_version":")" + std::string(app_desc->idf_ver) + R"(",)";
++    // 陪聊项目：上次重启原因 + 重启前最后在干什么（服务器据此判断是不是崩溃）
++    json += R"("reset_reason":")" + std::string(CrashInfo::ResetReason()) + R"(",)";
++    json += R"("last_action":")" + CrashInfo::LastBreadcrumb() + R"(",)";
++    json += R"("uptime_before_reset":)" + std::to_string(CrashInfo::UptimeBeforeReset()) + R"(,)";
+     char sha256_str[65];
+     for (int i = 0; i < 32; i++) {
+         snprintf(sha256_str + i * 2, sizeof(sha256_str) - i * 2, "%02x",
+diff --git a/main/boards/common/wifi_board.cc b/main/boards/common/wifi_board.cc
+index 5b3721d..e79b8ef 100644
+--- a/main/boards/common/wifi_board.cc
++++ b/main/boards/common/wifi_board.cc
+@@ -161,6 +161,14 @@ void WifiBoard::SetNetworkEventCallback(NetworkEventCallback callback) {
+ 
+ void WifiBoard::OnWifiConnectTimeout(void* arg) {
+     auto* board = static_cast<WifiBoard*>(arg);
++    // 陪聊项目：设备放在老人家里。停电后路由器往往比设备起得慢，60 秒连不上是常事；
++    // 原版这时会变成配网热点并永远停在那里，家里没人会去重新配网 → 设备等于报废。
++    // 只要 NVS 里存着 WiFi，就继续让 station 自己按退避间隔重试（它永不放弃），
++    // 需要重新配网时可以在设备菜单里手动进入。
++    if (!SsidManager::GetInstance().GetSsidList().empty()) {
++        ESP_LOGW(TAG, "WiFi connection timeout, but saved SSIDs exist; keep retrying in station mode");
++        return;
++    }
+     ESP_LOGW(TAG, "WiFi connection timeout, entering config mode");
+ 
+     WifiManager::GetInstance().StopStation();
+@@ -199,8 +207,11 @@ void WifiBoard::EnterWifiConfigMode() {
+     auto& app = Application::GetInstance();
+     auto state = app.GetDeviceState();
+ 
++    // 陪聊项目：加上 Activating / Connecting —— 连上一个上不了网的 WiFi（比如酒店的网页认证网络）
++    // 时设备会一直卡在"激活中"反复重试，原版这里会直接忽略配网请求，用户就再也进不了配网了
+     if (state == kDeviceStateSpeaking || state == kDeviceStateNotifying ||
+-        state == kDeviceStateListening || state == kDeviceStateIdle) {
++        state == kDeviceStateListening || state == kDeviceStateIdle ||
++        state == kDeviceStateActivating || state == kDeviceStateConnecting) {
+         // Reset protocol (close audio channel, reset protocol)
+         Application::GetInstance().ResetProtocol();
+ 
+@@ -283,7 +294,9 @@ void WifiBoard::SetPowerSaveLevel(PowerSaveLevel level) {
+     WifiPowerSaveLevel wifi_level;
+     switch (level) {
+         case PowerSaveLevel::LOW_POWER:
+-            wifi_level = WifiPowerSaveLevel::LOW_POWER;
++            // 陪聊项目：设备常年插电。MAX modem sleep 会让服务器推过来的消息（对讲、重启）
++            // 延迟甚至被路由器踢掉，这里待命时只用轻度省电。
++            wifi_level = WifiPowerSaveLevel::BALANCED;
+             break;
+         case PowerSaveLevel::BALANCED:
+             wifi_level = WifiPowerSaveLevel::BALANCED;
+diff --git a/main/boards/zhengchen-minicam/README.md b/main/boards/zhengchen-minicam/README.md
+new file mode 100644
+index 0000000..dd83c58
+--- /dev/null
++++ b/main/boards/zhengchen-minicam/README.md
+@@ -0,0 +1,38 @@
++# 征辰科技 Minicam Wi-Fi
++
++## 简介
++征辰科技 Minicam Wi-Fi 是征辰科技推出的小智 AI 迷你摄像头开发板，支持 Wi-Fi 联网、语音唤醒、语音打断、OTA 等功能。
++
++> 「我在呢」陪聊补丁只用到这块板的语音、屏幕和按键：**板上的摄像头不初始化，固件里没有任何拍照功能。**
++
++## 硬件特性
++- ESP32-S3 N16R8
++- ES8388 音频编解码器
++- OV 系列摄像头接口（本补丁不启用）
++- ST7789 240x320 LCD 显示屏
++- ADC 按键音量控制
++- 电池电量检测
++
++## 编译命令
++
++```bash
++python ./scripts/build.py zhengchen-minicam
++```
++
++如需手动编译，请参考 `config.json` 修改 menuconfig 对应选项。
++
++## 烧录
++
++```bash
++idf.py flash
++```
++
++## MCP Tool
++self.get_device_status
++self.audio_speaker.set_volume
++self.screen.set_brightness
++self.screen.set_theme
++self.display.set_mode
++self.AEC.set_mode
++self.AEC.get_mode
++self.res.esp_restart
+\ No newline at end of file
+diff --git a/main/boards/zhengchen-minicam/config.h b/main/boards/zhengchen-minicam/config.h
+new file mode 100644
+index 0000000..05e10fc
+--- /dev/null
++++ b/main/boards/zhengchen-minicam/config.h
+@@ -0,0 +1,74 @@
++#ifndef _BOARD_CONFIG_H_
++#define _BOARD_CONFIG_H_
++
++#include <driver/gpio.h>
++
++#define AUDIO_INPUT_REFERENCE       true
++
++#define AUDIO_INPUT_SAMPLE_RATE  24000
++#define AUDIO_OUTPUT_SAMPLE_RATE 24000
++
++#define AUDIO_I2S_GPIO_MCLK GPIO_NUM_38
++#define AUDIO_I2S_GPIO_WS GPIO_NUM_13
++#define AUDIO_I2S_GPIO_BCLK GPIO_NUM_14
++#define AUDIO_I2S_GPIO_DIN  GPIO_NUM_12
++#define AUDIO_I2S_GPIO_DOUT GPIO_NUM_45
++
++#define AUDIO_CODEC_PA_PIN       GPIO_NUM_NC
++#define AUDIO_CODEC_I2C_SCL_PIN  GPIO_NUM_2
++#define AUDIO_CODEC_I2C_SDA_PIN  GPIO_NUM_1
++#define AUDIO_CODEC_ES8388_ADDR ES8388_CODEC_DEFAULT_ADDR
++
++
++#define BUILTIN_LED_GPIO        GPIO_NUM_48
++#define STATE_OUTPUT_GPIO       GPIO_NUM_47
++#define BOOT_BUTTON_GPIO        GPIO_NUM_11
++#define TOUCH_BUTTON_GPIO       GPIO_NUM_NC
++#define VOLUME_UP_BUTTON_GPIO   GPIO_NUM_NC
++#define VOLUME_DOWN_BUTTON_GPIO GPIO_NUM_NC
++
++#define BATTERY_ADC_CHANNEL      ADC_CHANNEL_2  // GPIO3
++#define BATTERY_REF_ADC_CHANNEL  ADC_CHANNEL_3  // GPIO4
++#define VOLUME_KEY_ADC_CHANNEL   ADC_CHANNEL_8  // GPIO9
++#define VOLUME_DOWN_KEY_MIN_MV   0
++#define VOLUME_DOWN_KEY_MAX_MV   700
++#define VOLUME_UP_KEY_MIN_MV     900
++#define VOLUME_UP_KEY_MAX_MV     3000
++#define BATTERY_REF_VOLTAGE_MV   1270
++#define CHARGER_DETECT_RATIO     1.3f
++#define BATTERY_FULL_VOLTAGE_MV  4200
++
++// 板上的摄像头接口：「我在呢」不启用摄像头（不初始化、没有拍照功能），这里不再定义它的引脚。
++#define XCLK_FREQ_HZ       24000000
++
++
++#define DISPLAY_BACKLIGHT_PIN GPIO_NUM_42
++#define DISPLAY_MOSI_PIN      GPIO_NUM_41
++#define DISPLAY_CLK_PIN       GPIO_NUM_46
++#define DISPLAY_DC_PIN        GPIO_NUM_39
++#define DISPLAY_RST_PIN       GPIO_NUM_NC
++#define DISPLAY_CS_PIN        GPIO_NUM_40
++
++
++// LCD ST7789 Config
++#define LCD_TYPE_ST7789_SERIAL
++#define DISPLAY_WIDTH   240
++#define DISPLAY_HEIGHT  320
++#define DISPLAY_MIRROR_X false
++#define DISPLAY_MIRROR_Y false
++#define DISPLAY_SWAP_XY false
++
++#define DISPLAY_WIDTH_1  320
++#define DISPLAY_HEIGHT_1 240
++#define DISPLAY_MIRROR_X_1 true
++#define DISPLAY_MIRROR_Y_1 false
++#define DISPLAY_SWAP_XY_1 true
++
++#define DISPLAY_INVERT_COLOR    true
++#define DISPLAY_RGB_ORDER  LCD_RGB_ELEMENT_ORDER_RGB
++#define DISPLAY_OFFSET_X  0
++#define DISPLAY_OFFSET_Y  0
++#define DISPLAY_BACKLIGHT_OUTPUT_INVERT true
++#define DISPLAY_SPI_MODE 0
++
++#endif // _BOARD_CONFIG_H_
+diff --git a/main/boards/zhengchen-minicam/config.json b/main/boards/zhengchen-minicam/config.json
+new file mode 100644
+index 0000000..d87de10
+--- /dev/null
++++ b/main/boards/zhengchen-minicam/config.json
+@@ -0,0 +1,13 @@
++{
++    "manufacturer": "zhengchen",
++    "type": "zhengchen-minicam",
++    "target": "esp32s3",
++    "builds": [
++        {
++            "name": "zhengchen-minicam",
++            "sdkconfig_append": [
++                "CONFIG_USE_DEVICE_AEC=y"
++            ]
++        }
++    ]
++}
+\ No newline at end of file
+diff --git a/main/boards/zhengchen-minicam/zhengchen_minicam.cc b/main/boards/zhengchen-minicam/zhengchen_minicam.cc
+new file mode 100644
+index 0000000..d270b9f
+--- /dev/null
++++ b/main/boards/zhengchen-minicam/zhengchen_minicam.cc
+@@ -0,0 +1,632 @@
++#include "wifi_board.h"
++#include "codecs/es8388_audio_codec.h"
++#include "display/lcd_display.h"
++#include "system_reset.h"
++#include "application.h"
++#include "crash_info.h"
++#include "button.h"
++#include "config.h"
++#include "mcp_server.h"
++#include "led/single_led.h"
++#include "zhengchen_minicam_lcd_display.h"
++
++#include <esp_log.h>
++#include <driver/i2c_master.h>
++#include <driver/gpio.h>
++#include <wifi_manager.h>
++#include <esp_lcd_panel_vendor.h>
++#include <esp_lcd_panel_io.h>
++#include <esp_lcd_panel_ops.h>
++#include <driver/spi_common.h>
++#include <driver/i2c_master.h>
++#include <esp_adc/adc_oneshot.h>
++#include <esp_adc/adc_cali.h>
++#include <esp_adc/adc_cali_scheme.h>
++#include <freertos/FreeRTOS.h>
++#include <freertos/task.h>
++#include <freertos/semphr.h>
++
++#define TAG "zhengchen_minicam"
++
++class zhengchen_minicam : public WifiBoard {
++private:
++    Button boot_button_;
++    Button volume_up_button_;
++    Button volume_down_button_;
++    i2c_master_bus_handle_t codec_i2c_bus_;
++    adc_oneshot_unit_handle_t adc_handle_;
++    adc_cali_handle_t adc_cali_handle_;
++    TaskHandle_t adc_task_handle_;
++    TaskHandle_t volume_key_task_handle_;
++    SemaphoreHandle_t adc_mutex_;
++    Display* display_;
++    ZhengchenMinicamLcdDisplay* minicam_display_ = nullptr;
++    static constexpr size_t kBatteryAverageWindowSize = 8;
++    int battery_samples_mv_[kBatteryAverageWindowSize] = {0};
++    int battery_ref_samples_mv_[kBatteryAverageWindowSize] = {0};
++    size_t battery_sample_count_ = 0;
++    size_t battery_sample_index_ = 0;
++    int battery_voltage_mv_ = BATTERY_FULL_VOLTAGE_MV;
++    int battery_percent_ = 100;
++    int battery_sample_raw_ = 0;
++    int battery_ref_raw_ = 0;
++    int battery_sample_voltage_mv_ = 0;
++    int battery_ref_voltage_mv_ = BATTERY_REF_VOLTAGE_MV;
++    int volume_key_voltage_mv_ = 0;
++    bool is_charging_ = false;
++    int last_reported_battery_percent_ = -1;
++    bool last_reported_is_charging_ = false;
++    enum class AdcVolumeKeyState : uint8_t {
++        None,
++        VolumeDown,
++        VolumeUp,
++    };
++    AdcVolumeKeyState volume_key_state_ = AdcVolumeKeyState::None;
++    AdcVolumeKeyState volume_key_candidate_state_ = AdcVolumeKeyState::None;
++    uint8_t volume_key_stable_count_ = 0;
++    bool is_landscape_ = false;
++    int charging_samples_[3] = {0, 0, 0};
++    size_t charging_sample_count_ = 0;
++    size_t charging_sample_index_ = 0;
++
++    void UpdateStateOutput() {
++        const auto state = Application::GetInstance().GetDeviceState();
++        const int level = (state == kDeviceStateListening || state == kDeviceStateSpeaking) ? 0 : 1;
++        gpio_set_level(STATE_OUTPUT_GPIO, level);
++    }
++
++    void InitializeStateOutput() {
++        const gpio_config_t io_conf = {
++            .pin_bit_mask = 1ULL << STATE_OUTPUT_GPIO,
++            .mode = GPIO_MODE_OUTPUT,
++            .pull_up_en = GPIO_PULLUP_DISABLE,
++            .pull_down_en = GPIO_PULLDOWN_DISABLE,
++            .intr_type = GPIO_INTR_DISABLE,
++        };
++        ESP_ERROR_CHECK_WITHOUT_ABORT(gpio_config(&io_conf));
++        gpio_set_level(STATE_OUTPUT_GPIO, 1);
++    }
++
++    ZhengchenMinicamLcdDisplay* GetMinicamDisplay() {
++        // dynamic_cast 需要 RTTI，这个项目全局 -fno-rtti，所以用单独的成员指针
++        // 记录实际类型，而不是在 Display 基类指针上做动态类型转换
++        return minicam_display_;
++    }
++
++    void EnterSettingsMenu() {
++        auto* display = GetMinicamDisplay();
++        if (display == nullptr) {
++            return;
++        }
++        display->ShowSettingsMenu();
++        display->ShowNotification("设置菜单");
++    }
++
++    void ToggleSettingsMenu() {
++        auto* display = GetMinicamDisplay();
++        if (display == nullptr) {
++            return;
++        }
++
++        if (display->IsSettingsMenuVisible()) {
++            display->HideSettingsMenu();
++            display->ShowNotification("关闭设置");
++        } else {
++            display->ShowSettingsMenu();
++            display->ShowNotification("设置菜单");
++        }
++    }
++
++    void AdjustVolume(int delta) {
++        auto* codec = GetAudioCodec();
++        if (codec == nullptr) {
++            return;
++        }
++
++        int volume = codec->output_volume() + delta;
++        if (volume < 0) {
++            volume = 0;
++        }
++        if (volume > 100) {
++            volume = 100;
++        }
++
++        codec->SetOutputVolume(volume);
++        GetDisplay()->ShowNotification(std::to_string(volume / 10));
++    }
++
++    void ToggleAec() {
++        auto& app = Application::GetInstance();
++        app.SetAecMode(app.GetAecMode() == kAecOff ? kAecOnDeviceSide : kAecOff);
++    }
++
++    void ToggleOrientation() {
++        auto* display = GetMinicamDisplay();
++        if (display == nullptr) {
++            return;
++        }
++        display->ToggleOrientation();
++        display->ShowNotification((std::string("旋转 ") + std::to_string(display->RotationDegrees()) + "°").c_str());
++    }
++
++    void ReprovisionNetwork() {
++        EnterWifiConfigMode();
++    }
++
++    void HandleAdcVolumeKey(int voltage_mv) {
++        volume_key_voltage_mv_ = voltage_mv;
++
++        AdcVolumeKeyState new_state = AdcVolumeKeyState::None;
++        if (voltage_mv >= VOLUME_DOWN_KEY_MIN_MV && voltage_mv <= VOLUME_DOWN_KEY_MAX_MV) {
++            new_state = AdcVolumeKeyState::VolumeDown;
++        } else if (voltage_mv >= VOLUME_UP_KEY_MIN_MV && voltage_mv <= VOLUME_UP_KEY_MAX_MV) {
++            new_state = AdcVolumeKeyState::VolumeUp;
++        }
++
++        if (new_state != volume_key_candidate_state_) {
++            volume_key_candidate_state_ = new_state;
++            volume_key_stable_count_ = 1;
++            return;
++        }
++
++        if (volume_key_stable_count_ < 3) {
++            ++volume_key_stable_count_;
++            return;
++        }
++
++        if (new_state == volume_key_state_) {
++            return;
++        }
++
++        switch (new_state) {
++        case AdcVolumeKeyState::VolumeDown: {
++            auto* display = GetMinicamDisplay();
++            if (display != nullptr && display->IsSettingsMenuVisible()) {
++                display->SelectNextMenuItem();
++            } else {
++                AdjustVolume(-10);
++            }
++            break;
++        }
++        case AdcVolumeKeyState::VolumeUp: {
++            auto* display = GetMinicamDisplay();
++            if (display != nullptr && display->IsSettingsMenuVisible()) {
++                display->SelectPreviousMenuItem();
++            } else {
++                AdjustVolume(10);
++            }
++            break;
++        }
++        case AdcVolumeKeyState::None:
++            break;
++        }
++
++        volume_key_state_ = new_state;
++    }
++
++    void UpdateBatteryState(int battery_raw, int battery_voltage, int ref_raw, int ref_voltage) {
++        battery_sample_raw_ = battery_raw;
++        battery_sample_voltage_mv_ = battery_voltage;
++        battery_ref_raw_ = ref_raw;
++        battery_ref_voltage_mv_ = ref_voltage;
++
++        battery_samples_mv_[battery_sample_index_] = battery_voltage;
++        battery_ref_samples_mv_[battery_sample_index_] = ref_voltage;
++        battery_sample_index_ = (battery_sample_index_ + 1) % kBatteryAverageWindowSize;
++        if (battery_sample_count_ < kBatteryAverageWindowSize) {
++            ++battery_sample_count_;
++        }
++
++        int battery_voltage_sum = 0;
++        int ref_voltage_sum = 0;
++        for (size_t i = 0; i < battery_sample_count_; ++i) {
++            battery_voltage_sum += battery_samples_mv_[i];
++            ref_voltage_sum += battery_ref_samples_mv_[i];
++        }
++        battery_voltage = battery_voltage_sum / static_cast<int>(battery_sample_count_);
++        ref_voltage = ref_voltage_sum / static_cast<int>(battery_sample_count_);
++
++        is_charging_ = ref_raw > 2300;
++
++        float battery_voltage_v = 0.0f;
++        if (is_charging_) {
++            battery_voltage_v = static_cast<float>(battery_voltage) * 2.0f / 1000.0f;
++        } else {
++            if (ref_voltage <= 0) {
++                return;
++            }
++            battery_voltage_v = static_cast<float>(battery_voltage) * static_cast<float>(BATTERY_REF_VOLTAGE_MV) * 2.0f /
++                (static_cast<float>(ref_voltage) * 1000.0f);
++        }
++
++        battery_voltage_mv_ = static_cast<int>(battery_voltage_v * 1000.0f + 0.5f);
++
++        int percent = static_cast<int>(((battery_voltage_v - 3.4f) * 100.0f / 0.8f) + 0.5f);
++        if (percent < 0) {
++            percent = 0;
++        }
++        if (percent > 100) {
++            percent = 100;
++        }
++        battery_percent_ = percent;
++
++        if (display_ != nullptr && (battery_percent_ != last_reported_battery_percent_ || is_charging_ != last_reported_is_charging_)) {
++            last_reported_battery_percent_ = battery_percent_;
++            last_reported_is_charging_ = is_charging_;
++            Application::GetInstance().Schedule([this]() {
++                if (display_ != nullptr) {
++                    display_->UpdateStatusBar(true);
++                }
++            });
++        }
++    }
++
++    void InitializeI2c() {
++        i2c_master_bus_config_t i2c_bus_cfg = {
++            .i2c_port = I2C_NUM_0,
++            .sda_io_num = AUDIO_CODEC_I2C_SDA_PIN,
++            .scl_io_num = AUDIO_CODEC_I2C_SCL_PIN,
++            .clk_source = I2C_CLK_SRC_DEFAULT,
++            .glitch_ignore_cnt = 7,
++            .intr_priority = 0,
++            .trans_queue_depth = 0,
++            .flags = {
++                .enable_internal_pullup = 1,
++            },
++        };
++        codec_i2c_bus_ = nullptr;
++        esp_err_t i2c_err = i2c_new_master_bus(&i2c_bus_cfg, &codec_i2c_bus_);
++        if (i2c_err != ESP_OK) {
++            ESP_LOGE(TAG, "i2c_new_master_bus failed (%s), retrying once", esp_err_to_name(i2c_err));
++            vTaskDelay(pdMS_TO_TICKS(200));
++            codec_i2c_bus_ = nullptr;
++            i2c_err = i2c_new_master_bus(&i2c_bus_cfg, &codec_i2c_bus_);
++        }
++        if (i2c_err != ESP_OK || codec_i2c_bus_ == nullptr) {
++            ESP_LOGE(TAG, "I2C bus unavailable; skipping scan (audio codec may not work this boot)");
++            codec_i2c_bus_ = nullptr;
++            return;
++        }
++
++        // 扫描 I2C 总线上的设备
++        ESP_LOGI(TAG, "Scanning I2C bus...");
++        for (uint8_t addr = 0x08; addr < 0x78; addr++) {
++            i2c_device_config_t dev_cfg = {
++                .dev_addr_length = I2C_ADDR_BIT_LEN_7,
++                .device_address = addr,
++                .scl_speed_hz = 100000,
++            };
++
++            i2c_master_dev_handle_t dev_handle;
++            if (i2c_master_bus_add_device(codec_i2c_bus_, &dev_cfg, &dev_handle) == ESP_OK) {
++                uint8_t data;
++                if (i2c_master_receive(dev_handle, &data, 1, 100) == ESP_OK) {
++                    ESP_LOGI(TAG, "Found I2C device at address 0x%02X", addr);
++                }
++                i2c_master_bus_rm_device(dev_handle);
++            }
++        }
++        ESP_LOGI(TAG, "I2C scan complete");
++    }
++
++    static void adc_read_task(void* arg) {
++        zhengchen_minicam* self = static_cast<zhengchen_minicam*>(arg);
++        int battery_raw = 0;
++        int battery_voltage = 0;
++        int ref_raw = 0;
++        int ref_voltage = 0;
++
++        while (1) {
++            self->UpdateStateOutput();
++            if (xSemaphoreTake(self->adc_mutex_, portMAX_DELAY) == pdTRUE) {
++                ESP_ERROR_CHECK_WITHOUT_ABORT(adc_oneshot_read(self->adc_handle_, BATTERY_ADC_CHANNEL, &battery_raw));
++                ESP_ERROR_CHECK_WITHOUT_ABORT(adc_oneshot_read(self->adc_handle_, BATTERY_REF_ADC_CHANNEL, &ref_raw));
++                xSemaphoreGive(self->adc_mutex_);
++            }
++
++            if (self->adc_cali_handle_) {
++                ESP_ERROR_CHECK_WITHOUT_ABORT(adc_cali_raw_to_voltage(self->adc_cali_handle_, battery_raw, &battery_voltage));
++                ESP_ERROR_CHECK_WITHOUT_ABORT(adc_cali_raw_to_voltage(self->adc_cali_handle_, ref_raw, &ref_voltage));
++                self->UpdateBatteryState(battery_raw, battery_voltage, ref_raw, ref_voltage);
++            }
++            vTaskDelay(pdMS_TO_TICKS(30));
++        }
++    }
++
++    static void volume_key_task(void* arg) {
++        zhengchen_minicam* self = static_cast<zhengchen_minicam*>(arg);
++        int volume_key_raw = 0;
++        int volume_key_voltage = 0;
++
++        while (1) {
++            if (xSemaphoreTake(self->adc_mutex_, portMAX_DELAY) == pdTRUE) {
++                ESP_ERROR_CHECK_WITHOUT_ABORT(adc_oneshot_read(self->adc_handle_, VOLUME_KEY_ADC_CHANNEL, &volume_key_raw));
++                xSemaphoreGive(self->adc_mutex_);
++            }
++
++            if (self->adc_cali_handle_) {
++                ESP_ERROR_CHECK_WITHOUT_ABORT(adc_cali_raw_to_voltage(self->adc_cali_handle_, volume_key_raw, &volume_key_voltage));
++                self->HandleAdcVolumeKey(volume_key_voltage);
++            } else {
++                self->HandleAdcVolumeKey(0);
++            }
++            vTaskDelay(pdMS_TO_TICKS(20));
++        }
++    }
++
++    void InitializeADC() {
++        // 配置 ADC
++        adc_oneshot_unit_init_cfg_t init_config = {
++            .unit_id = ADC_UNIT_1,
++            .ulp_mode = ADC_ULP_MODE_DISABLE,
++        };
++        ESP_ERROR_CHECK_WITHOUT_ABORT(adc_oneshot_new_unit(&init_config, &adc_handle_));
++
++        // 配置 ADC 通道
++        adc_oneshot_chan_cfg_t config = {
++            .atten = ADC_ATTEN_DB_12,
++            .bitwidth = ADC_BITWIDTH_DEFAULT,
++        };
++        ESP_ERROR_CHECK_WITHOUT_ABORT(adc_oneshot_config_channel(adc_handle_, BATTERY_ADC_CHANNEL, &config));
++        ESP_ERROR_CHECK_WITHOUT_ABORT(adc_oneshot_config_channel(adc_handle_, BATTERY_REF_ADC_CHANNEL, &config));
++        ESP_ERROR_CHECK_WITHOUT_ABORT(adc_oneshot_config_channel(adc_handle_, VOLUME_KEY_ADC_CHANNEL, &config));
++
++        // 尝试初始化校准 (ESP32-S3 使用 curve_fitting)
++        adc_cali_curve_fitting_config_t cali_config = {
++            .unit_id = ADC_UNIT_1,
++            .atten = ADC_ATTEN_DB_12,
++            .bitwidth = ADC_BITWIDTH_DEFAULT,
++        };
++        esp_err_t ret = adc_cali_create_scheme_curve_fitting(&cali_config, &adc_cali_handle_);
++        if (ret == ESP_OK) {
++            ESP_LOGI(TAG, "ADC calibration initialized");
++        } else {
++            ESP_LOGW(TAG, "ADC calibration not available");
++            adc_cali_handle_ = nullptr;
++        }
++
++        adc_mutex_ = xSemaphoreCreateMutex();
++        assert(adc_mutex_ != nullptr);
++
++        // 创建 ADC 读取任务
++        xTaskCreate(adc_read_task, "adc_read", 4096, this, 5, &adc_task_handle_);
++        xTaskCreatePinnedToCore(volume_key_task, "volume_key", 4096, this, 6, &volume_key_task_handle_, 1);
++        ESP_LOGI(TAG, "ADC monitoring task started for IO3/IO4 battery sampling");
++        ESP_LOGI(TAG, "Volume key task started on CPU1");
++    }
++
++    void InitializeSpi() {
++        spi_bus_config_t buscfg = {};
++        buscfg.mosi_io_num = DISPLAY_MOSI_PIN;
++        buscfg.miso_io_num = GPIO_NUM_NC;
++        buscfg.sclk_io_num = DISPLAY_CLK_PIN;
++        buscfg.quadwp_io_num = GPIO_NUM_NC;
++        buscfg.quadhd_io_num = GPIO_NUM_NC;
++        buscfg.max_transfer_sz = DISPLAY_WIDTH * DISPLAY_HEIGHT * sizeof(uint16_t);
++        ESP_ERROR_CHECK_WITHOUT_ABORT(spi_bus_initialize(SPI3_HOST, &buscfg, SPI_DMA_CH_AUTO));
++    }
++
++    void InitializeLcdDisplay() {
++        esp_lcd_panel_io_handle_t panel_io = nullptr;
++        esp_lcd_panel_handle_t panel = nullptr;
++
++        ESP_LOGD(TAG, "Install panel IO");
++        esp_lcd_panel_io_spi_config_t io_config = {};
++        io_config.cs_gpio_num = DISPLAY_CS_PIN;
++        io_config.dc_gpio_num = DISPLAY_DC_PIN;
++        io_config.spi_mode = DISPLAY_SPI_MODE;
++        io_config.pclk_hz = 40 * 1000 * 1000;
++        io_config.trans_queue_depth = 10;
++        io_config.lcd_cmd_bits = 8;
++        io_config.lcd_param_bits = 8;
++
++        if (esp_lcd_new_panel_io_spi(SPI3_HOST, &io_config, &panel_io) != ESP_OK) {
++            ESP_LOGE(TAG, "Failed to create panel IO");
++            display_ = new NoDisplay();
++            return;
++        }
++
++        ESP_LOGD(TAG, "Install LCD driver");
++        esp_lcd_panel_dev_config_t panel_config = {};
++        panel_config.reset_gpio_num = DISPLAY_RST_PIN;
++        panel_config.rgb_ele_order = DISPLAY_RGB_ORDER;
++        panel_config.bits_per_pixel = 16;
++
++        if (esp_lcd_new_panel_st7789(panel_io, &panel_config, &panel) != ESP_OK) {
++            ESP_LOGE(TAG, "Failed to create panel");
++            display_ = new NoDisplay();
++            return;
++        }
++
++        esp_lcd_panel_reset(panel);
++        esp_lcd_panel_init(panel);
++        esp_lcd_panel_invert_color(panel, DISPLAY_INVERT_COLOR);
++        esp_lcd_panel_swap_xy(panel, DISPLAY_SWAP_XY);
++        esp_lcd_panel_mirror(panel, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y);
++
++        auto* minicam_display = new ZhengchenMinicamLcdDisplay(panel_io, panel,
++                                    DISPLAY_WIDTH, DISPLAY_HEIGHT,
++                                    DISPLAY_OFFSET_X, DISPLAY_OFFSET_Y,
++                                    DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y,
++                                    DISPLAY_SWAP_XY);
++        display_ = minicam_display;
++        minicam_display_ = minicam_display;
++    }
++
++    void InitializeButtons() {
++        // 陪聊项目：这块板子长按大按钮 2-3 秒就会被电源管理芯片直接断电（硬件层面的
++        // "长按开机/关机"，跟固件逻辑无关，软件挡不住），所以不能用"按住说话"，
++        // 改成"点一下开始、再点一下结束"，每次点击都是瞬间动作，不会碰到断电阈值
++        boot_button_.OnClick([this]() {
++            auto* display = GetMinicamDisplay();
++            if (display != nullptr && display->IsSettingsMenuVisible()) {
++                // 按键回调跑在 esp_timer 任务里，不能在这里等 LVGL 锁（会把系统时钟卡住）→ 交给主循环
++                Application::GetInstance().Schedule([display]() { display->ActivateSelectedMenuItem(); });
++                return;
++            }
++
++            auto& app = Application::GetInstance();
++            if (app.GetDeviceState() == kDeviceStateStarting) {
++                return;
++            }
++            // 拍一下 = 开始一段连续对话（服务器先打招呼，然后一直听、说完自动再听）；
++            // 对话进行中（连接中 / 正在听 / 正在说）再拍一下 = 整个对话立刻停下、回到待命
++            auto st = app.GetDeviceState();
++            if (st == kDeviceStateSpeaking || st == kDeviceStateConnecting) {
++                // 它在说 / 在连：拍一下 = 停下（"不想听了拍一下就停"）
++                app.StopConversation();
++            } else if (st == kDeviceStateListening) {
++                // 它在听对方说：拍一下不要结束对话。很多老人习惯"拍一下再说话"，这一拍若结束对话，
++                // 后面说的话就没人听了。对话靠服务器在 90 秒没人说话时自动收。
++                ESP_LOGI(TAG, "tap while listening: ignored (keep listening)");
++            } else {
++                app.StartConversation();
++            }
++        });
++
++        boot_button_.OnDoubleClick([this]() {
++            Application::GetInstance().Schedule([this]() { ToggleSettingsMenu(); });
++        });
++    }
++
++    void InitializeTools() {
++        auto* minicam_display = GetMinicamDisplay();
++        if (minicam_display != nullptr) {
++            minicam_display->SetAecHandlers(
++                []() -> bool {
++                    return Application::GetInstance().GetAecMode() != kAecOff;
++                },
++                [this]() {
++                    ToggleAec();
++                });
++            minicam_display->SetOrientationHandlers(
++                [minicam_display]() -> bool {
++                    return minicam_display->IsLandscape();
++                },
++                [this]() {
++                    ToggleOrientation();
++                });
++            minicam_display->SetProactiveHandlers(
++                []() -> bool { return Application::GetInstance().IsProactiveEnabled(); },
++                []() {
++                    auto& app = Application::GetInstance();
++                    app.SetProactiveEnabled(!app.IsProactiveEnabled());
++                });
++            minicam_display->SetReprovisionCallback([this]() {
++                ReprovisionNetwork();
++            });
++        }
++    }
++
++public:
++    zhengchen_minicam()
++        : boot_button_(BOOT_BUTTON_GPIO),
++          volume_up_button_(VOLUME_UP_BUTTON_GPIO),
++          volume_down_button_(VOLUME_DOWN_BUTTON_GPIO),
++          adc_handle_(nullptr),
++          adc_cali_handle_(nullptr),
++          adc_task_handle_(nullptr),
++          volume_key_task_handle_(nullptr),
++          adc_mutex_(nullptr),
++          display_(nullptr) {
++        // 陪聊项目：开机初始化每一步都记面包屑（崩了能知道死在哪一步）；
++        // 上次开机就是在初始化阶段崩的 → 先等 800ms 让电源稳一稳
++        const int boot_crashes = CrashInfo::ConsecutiveBootCrashes();
++        const int power_resets = CrashInfo::ConsecutivePowerResets();
++        if (power_resets >= 2) {
++            // 电源不稳（连着掉电复位）：等电压缓一缓再上电子设备
++            ESP_LOGE(TAG, "Power unstable (%d brownouts in a row): slow boot", power_resets);
++            vTaskDelay(pdMS_TO_TICKS(3000));
++        }
++        if (boot_crashes > 0) {
++            ESP_LOGW(TAG, "Previous boot crashed during init (%d in a row); settling power before init", boot_crashes);
++            vTaskDelay(pdMS_TO_TICKS(800));
++        }
++        CrashInfo::Breadcrumb("init:state_output"); InitializeStateOutput();
++        CrashInfo::Breadcrumb("init:i2c");          InitializeI2c();
++        CrashInfo::Breadcrumb("init:adc");          InitializeADC();
++        CrashInfo::Breadcrumb("init:spi");          InitializeSpi();
++        CrashInfo::Breadcrumb("init:lcd");          InitializeLcdDisplay();
++        if (DISPLAY_BACKLIGHT_PIN != GPIO_NUM_NC) {
++            GetBacklight()->RestoreBrightness();
++        }
++        CrashInfo::Breadcrumb("init:buttons");      InitializeButtons();
++        // 板上带摄像头，但「我在呢」不初始化它，也不提供任何拍照功能
++        CrashInfo::Breadcrumb("init:tools");        InitializeTools();
++        CrashInfo::Breadcrumb("init:done");
++    }
++
++    virtual Led* GetLed() override {
++        static SingleLed led(BUILTIN_LED_GPIO);
++        return &led;
++    }
++
++    virtual Display* GetDisplay() override {
++        return display_;
++    }
++
++    virtual AudioCodec* GetAudioCodec() override {
++        static bool codec_crumb_once = false;
++        if (!codec_crumb_once) { codec_crumb_once = true; CrashInfo::Breadcrumb("init:codec"); }
++        static Es8388AudioCodec audio_codec(
++            codec_i2c_bus_, I2C_NUM_0, AUDIO_INPUT_SAMPLE_RATE,
++            AUDIO_OUTPUT_SAMPLE_RATE, AUDIO_I2S_GPIO_MCLK, AUDIO_I2S_GPIO_BCLK,
++            AUDIO_I2S_GPIO_WS, AUDIO_I2S_GPIO_DOUT, AUDIO_I2S_GPIO_DIN,
++            AUDIO_CODEC_PA_PIN, AUDIO_CODEC_ES8388_ADDR, AUDIO_INPUT_REFERENCE);
++        return &audio_codec;
++    }
++
++    virtual Backlight* GetBacklight() override {
++        if (DISPLAY_BACKLIGHT_PIN != GPIO_NUM_NC) {
++            static PwmBacklight backlight(DISPLAY_BACKLIGHT_PIN, DISPLAY_BACKLIGHT_OUTPUT_INVERT);
++            return &backlight;
++        }
++        return nullptr;
++    }
++
++    virtual std::string GetDeviceStatusJson() override {
++        auto root = cJSON_CreateObject();
++
++        auto audio_speaker = cJSON_CreateObject();
++        if (auto codec = GetAudioCodec()) {
++            cJSON_AddNumberToObject(audio_speaker, "volume", codec->output_volume());
++        }
++        cJSON_AddItemToObject(root, "audio_speaker", audio_speaker);
++
++        auto screen = cJSON_CreateObject();
++        if (auto backlight = GetBacklight()) {
++            cJSON_AddNumberToObject(screen, "brightness", backlight->brightness());
++        }
++        if (auto display = GetDisplay(); display && display->height() > 64) {
++            if (auto theme = display->GetTheme()) {
++                cJSON_AddStringToObject(screen, "theme", theme->name().c_str());
++            }
++        }
++        cJSON_AddItemToObject(root, "screen", screen);
++
++        auto network = cJSON_CreateObject();
++        auto& wifi = WifiManager::GetInstance();
++        cJSON_AddStringToObject(network, "type", "wifi");
++        cJSON_AddStringToObject(network, "ssid", wifi.GetSsid().c_str());
++        int rssi = wifi.GetRssi();
++        const char* signal = rssi >= -60 ? "strong" : (rssi >= -70 ? "medium" : "weak");
++        cJSON_AddStringToObject(network, "signal", signal);
++        cJSON_AddItemToObject(root, "network", network);
++
++        auto str = cJSON_PrintUnformatted(root);
++        std::string result(str);
++        cJSON_free(str);
++        cJSON_Delete(root);
++        return result;
++    }
++
++    virtual bool GetBatteryLevel(int& level, bool& charging, bool& discharging) override {
++        level = battery_percent_;
++        charging = is_charging_;
++        discharging = !charging;
++        return true;
++    }
++
++};
++
++DECLARE_BOARD(zhengchen_minicam);
+diff --git a/main/boards/zhengchen-minicam/zhengchen_minicam_lcd_display.cc b/main/boards/zhengchen-minicam/zhengchen_minicam_lcd_display.cc
+new file mode 100644
+index 0000000..b8a3c36
+--- /dev/null
++++ b/main/boards/zhengchen-minicam/zhengchen_minicam_lcd_display.cc
+@@ -0,0 +1,615 @@
++#include "zhengchen_minicam_lcd_display.h"
++
++#include "config.h"
++#include "display/display.h"
++#include "lvgl_theme.h"
++#include "settings.h"
++#include "application.h"
++
++#include <cstdlib>
++
++#include <string>
++#include <algorithm>
++
++namespace {
++struct SettingsMenuMetrics {
++    lv_coord_t menu_margin;
++    lv_coord_t menu_pad_x;
++    lv_coord_t menu_pad_y;
++    lv_coord_t row_pad_x;
++    lv_coord_t row_pad_y;
++    lv_coord_t title_pad_bottom;
++    lv_coord_t line_space;
++    const char* title_text;
++};
++
++SettingsMenuMetrics GetSettingsMenuMetrics(bool is_landscape) {
++    if (is_landscape) {
++        return {
++            .menu_margin = 8,
++            .menu_pad_x = 8,
++            .menu_pad_y = 4,
++            .row_pad_x = 6,
++            .row_pad_y = 2,
++            .title_pad_bottom = 4,
++            .line_space = 0,
++            .title_text = "设置Settings",
++        };
++    }
++
++    return {
++        .menu_margin = 16,
++        .menu_pad_x = 10,
++        .menu_pad_y = 8,
++        .row_pad_x = 8,
++        .row_pad_y = 5,
++        .title_pad_bottom = 8,
++        .line_space = 2,
++        .title_text = "设置",
++    };
++}
++}
++
++#if !CONFIG_USE_WECHAT_MESSAGE_STYLE
++namespace {
++void ApplyFullscreenPreviewTransform(lv_obj_t* preview_image, const lv_image_dsc_t* img_dsc, bool is_landscape) {
++    lv_image_set_rotation(preview_image, is_landscape ? 900 : 0);
++    if (img_dsc->header.w <= 0 || img_dsc->header.h <= 0) {
++        return;
++    }
++
++    const int32_t max_width = LV_HOR_RES * 9 / 10;
++    const int32_t max_height = LV_VER_RES * 9 / 10;
++    const int32_t display_width = is_landscape ? img_dsc->header.h : img_dsc->header.w;
++    const int32_t display_height = is_landscape ? img_dsc->header.w : img_dsc->header.h;
++    const uint32_t scale_x = (static_cast<uint32_t>(max_width) * 256) / display_width;
++    const uint32_t scale_y = (static_cast<uint32_t>(max_height) * 256) / display_height;
++    lv_image_set_scale(preview_image, std::min(scale_x, scale_y));
++}
++}
++#endif
++
++void ZhengchenMinicamLcdDisplay::SetupUI() {
++    if (IsSetupUICalled()) {
++        return;
++    }
++
++    Settings settings(kSettingsNamespace);
++    rotation_index_ = settings.GetInt(kRotationKey, 0) & 3;
++    is_landscape_ = (rotation_index_ == 1 || rotation_index_ == 3);
++    lv_display_set_rotation(display_, static_cast<lv_display_rotation_t>(rotation_index_));
++
++    SpiLcdDisplay::SetupUI();
++
++    DisplayLockGuard lock(this);
++    if (low_battery_popup_ != nullptr) {
++        lv_obj_remove_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN);
++        lv_obj_set_size(low_battery_popup_, 1, 1);
++        lv_obj_align(low_battery_popup_, LV_ALIGN_TOP_LEFT, -LV_HOR_RES, -LV_VER_RES);
++    }
++    CreateSettingsMenuLocked();
++    ApplyMenuThemeLocked();
++    RefreshSettingsMenuLocked();
++}
++
++void ZhengchenMinicamLcdDisplay::SetTheme(Theme* theme) {
++    SpiLcdDisplay::SetTheme(theme);
++
++    if (low_battery_popup_ != nullptr) {
++        DisplayLockGuard lock(this);
++        lv_obj_remove_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN);
++        lv_obj_set_size(low_battery_popup_, 1, 1);
++        lv_obj_align(low_battery_popup_, LV_ALIGN_TOP_LEFT, -LV_HOR_RES, -LV_VER_RES);
++    }
++
++    if (settings_menu_ == nullptr) {
++        return;
++    }
++
++    DisplayLockGuard lock(this);
++    ApplyMenuThemeLocked();
++    RefreshSettingsMenuLocked();
++}
++
++void ZhengchenMinicamLcdDisplay::UpdateStatusBar(bool update_all) {
++    auto* saved_low_battery_popup = low_battery_popup_;
++    auto* saved_low_battery_label = low_battery_label_;
++    low_battery_popup_ = nullptr;
++    low_battery_label_ = nullptr;
++
++    SpiLcdDisplay::UpdateStatusBar(update_all);
++
++    low_battery_popup_ = saved_low_battery_popup;
++    low_battery_label_ = saved_low_battery_label;
++
++    DisplayLockGuard lock(this);
++    if (low_battery_popup_ != nullptr) {
++        lv_obj_remove_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN);
++        lv_obj_set_size(low_battery_popup_, 1, 1);
++        lv_obj_align(low_battery_popup_, LV_ALIGN_TOP_LEFT, -LV_HOR_RES, -LV_VER_RES);
++    }
++}
++
++void ZhengchenMinicamLcdDisplay::ShowSettingsMenu() {
++    DisplayLockGuard lock(this);
++    if (settings_menu_ == nullptr) {
++        return;
++    }
++    lv_obj_remove_flag(settings_menu_, LV_OBJ_FLAG_HIDDEN);
++    RefreshSettingsMenuLocked();
++}
++
++void ZhengchenMinicamLcdDisplay::HideSettingsMenu() {
++    DisplayLockGuard lock(this);
++    if (settings_menu_ == nullptr) {
++        return;
++    }
++    lv_obj_add_flag(settings_menu_, LV_OBJ_FLAG_HIDDEN);
++}
++
++void ZhengchenMinicamLcdDisplay::ToggleSettingsMenu() {
++    if (IsSettingsMenuVisible()) {
++        HideSettingsMenu();
++    } else {
++        ShowSettingsMenu();
++    }
++}
++
++bool ZhengchenMinicamLcdDisplay::IsSettingsMenuVisible() const {
++    return settings_menu_ != nullptr && !lv_obj_has_flag(settings_menu_, LV_OBJ_FLAG_HIDDEN);
++}
++
++void ZhengchenMinicamLcdDisplay::SelectPreviousMenuItem() {
++    DisplayLockGuard lock(this);
++    if (settings_menu_ == nullptr) {
++        return;
++    }
++    SetSelectedIndex(selected_index_ - 1);
++    RefreshSettingsMenuLocked();
++}
++
++void ZhengchenMinicamLcdDisplay::SelectNextMenuItem() {
++    DisplayLockGuard lock(this);
++    if (settings_menu_ == nullptr) {
++        return;
++    }
++    SetSelectedIndex(selected_index_ + 1);
++    RefreshSettingsMenuLocked();
++}
++
++void ZhengchenMinicamLcdDisplay::ActivateSelectedMenuItem() {
++    switch (static_cast<MenuItem>(selected_index_)) {
++    case MenuItem::Aec:
++        if (aec_toggle_callback_) {
++            aec_toggle_callback_();
++        }
++        ShowNotification((std::string("AEC: ") + (aec_getter_ != nullptr && aec_getter_() ? "On" : "Off")).c_str());
++        break;
++    case MenuItem::Orientation:
++        if (orientation_toggle_callback_) {
++            orientation_toggle_callback_();
++        }
++        ShowNotification((std::string("旋转 ") + std::to_string(RotationDegrees()) + "°").c_str());
++        break;
++    case MenuItem::Proactive:
++        if (proactive_toggle_callback_) {
++            proactive_toggle_callback_();
++        }
++        ShowNotification((std::string("主动问候：") + (proactive_getter_ != nullptr && proactive_getter_() ? "开" : "关")).c_str());
++        break;
++    case MenuItem::Reprovision:
++        HideSettingsMenu();
++        if (reprovision_callback_) {
++            reprovision_callback_();
++        }
++        ShowNotification("重新配网 / Reprovision");
++        break;
++    case MenuItem::Count:
++        break;
++    }
++
++    DisplayLockGuard lock(this);
++    if (settings_menu_ != nullptr) {
++        RefreshSettingsMenuLocked();
++    }
++}
++
++void ZhengchenMinicamLcdDisplay::SetAecHandlers(std::function<bool()> getter, std::function<void()> toggle_callback) {
++    aec_getter_ = std::move(getter);
++    aec_toggle_callback_ = std::move(toggle_callback);
++}
++
++void ZhengchenMinicamLcdDisplay::SetProactiveHandlers(std::function<bool()> getter, std::function<void()> toggle_callback) {
++    proactive_getter_ = std::move(getter);
++    proactive_toggle_callback_ = std::move(toggle_callback);
++}
++
++void ZhengchenMinicamLcdDisplay::SetOrientationHandlers(std::function<bool()> getter, std::function<void()> toggle_callback) {
++    orientation_getter_ = std::move(getter);
++    orientation_toggle_callback_ = std::move(toggle_callback);
++}
++
++void ZhengchenMinicamLcdDisplay::SetReprovisionCallback(std::function<void()> callback) {
++    reprovision_callback_ = std::move(callback);
++}
++
++bool ZhengchenMinicamLcdDisplay::IsLandscape() const {
++    return is_landscape_;
++}
++
++int ZhengchenMinicamLcdDisplay::RotationDegrees() const {
++    return rotation_index_ * 90;
++}
++
++void ZhengchenMinicamLcdDisplay::ToggleOrientation() {
++    // 每点一次转 90°，四档循环。只走 LVGL 的 rotation（esp_lvgl_port 在 sw_rotate=0
++    // 时会据此自动下发 swap_xy/mirror 给面板），不再手动调 esp_lcd_panel_*，
++    // 避免两边各转一次、结果对不上
++    rotation_index_ = (rotation_index_ + 1) & 3;
++    is_landscape_ = (rotation_index_ == 1 || rotation_index_ == 3);
++    Settings settings(kSettingsNamespace, true);
++    settings.SetInt(kRotationKey, rotation_index_);
++
++    DisplayLockGuard lock(this);
++    lv_display_set_rotation(display_, static_cast<lv_display_rotation_t>(rotation_index_));
++
++    if (container_ != nullptr) {
++        lv_obj_set_size(container_, LV_HOR_RES, LV_VER_RES);
++    }
++    if (top_bar_ != nullptr) {
++        lv_obj_set_width(top_bar_, LV_HOR_RES);
++        lv_obj_align(top_bar_, LV_ALIGN_TOP_MID, 0, 0);
++        lv_obj_update_layout(top_bar_);
++    }
++    if (status_bar_ != nullptr) {
++        lv_obj_set_width(status_bar_, LV_HOR_RES);
++        lv_obj_align(status_bar_, LV_ALIGN_TOP_MID, 0, 0);
++    }
++    if (notification_label_ != nullptr) {
++        lv_obj_set_width(notification_label_, LV_HOR_RES * 0.75);
++        lv_obj_align(notification_label_, LV_ALIGN_CENTER, 0, 0);
++    }
++    if (status_label_ != nullptr) {
++        lv_obj_set_width(status_label_, LV_HOR_RES * 0.75);
++        lv_obj_align(status_label_, LV_ALIGN_CENTER, 0, 0);
++    }
++    if (bottom_bar_ != nullptr) {
++        lv_obj_set_width(bottom_bar_, LV_HOR_RES);
++        lv_obj_align(bottom_bar_, LV_ALIGN_BOTTOM_MID, 0, 0);
++    }
++    if (chat_message_label_ != nullptr) {
++        lv_obj_set_width(chat_message_label_, LV_HOR_RES - 8);
++        lv_obj_align(chat_message_label_, LV_ALIGN_CENTER, 0, 0);
++    }
++    if (content_ != nullptr) {
++        const lv_coord_t top_bar_height = top_bar_ != nullptr ? lv_obj_get_height(top_bar_) : 0;
++        const lv_coord_t status_bar_height = status_bar_ != nullptr ? lv_obj_get_height(status_bar_) : 0;
++        lv_obj_set_size(content_, LV_HOR_RES, LV_VER_RES - status_bar_height - top_bar_height);
++        if (status_bar_ != nullptr) {
++            lv_obj_align_to(content_, status_bar_, LV_ALIGN_OUT_BOTTOM_MID, 0, 0);
++        } else if (top_bar_ != nullptr) {
++            lv_obj_align_to(content_, top_bar_, LV_ALIGN_OUT_BOTTOM_MID, 0, 0);
++        } else {
++            lv_obj_align(content_, LV_ALIGN_TOP_MID, 0, 0);
++        }
++        lv_obj_update_layout(content_);
++    }
++    if (low_battery_popup_ != nullptr) {
++        lv_obj_set_size(low_battery_popup_, LV_HOR_RES * 0.9, lv_obj_get_height(low_battery_popup_));
++        lv_obj_align(low_battery_popup_, LV_ALIGN_BOTTOM_MID, 0, -4);
++    }
++#if !CONFIG_USE_WECHAT_MESSAGE_STYLE
++    if (preview_image_ != nullptr) {
++        lv_obj_set_size(preview_image_, LV_HOR_RES, LV_VER_RES);
++        lv_obj_align(preview_image_, LV_ALIGN_CENTER, 0, 0);
++        if (preview_image_cached_ != nullptr) {
++            ApplyFullscreenPreviewTransform(preview_image_, preview_image_cached_->image_dsc(), is_landscape_);
++        }
++    }
++#endif
++
++    if (settings_menu_ != nullptr) {
++        ApplyMenuThemeLocked();
++        lv_obj_set_size(settings_menu_, LV_HOR_RES - 24, LV_VER_RES - 48);
++        lv_obj_align(settings_menu_, LV_ALIGN_CENTER, 0, 0);
++        lv_obj_update_layout(settings_menu_);
++        RefreshSettingsMenuLocked();
++        lv_obj_update_layout(settings_menu_);
++    }
++}
++
++
++void ZhengchenMinicamLcdDisplay::SetPreviewImage(std::unique_ptr<LvglImage> image) {
++#if CONFIG_USE_WECHAT_MESSAGE_STYLE
++    DisplayLockGuard lock(this);
++    if (content_ == nullptr) {
++        return;
++    }
++
++    if (image == nullptr) {
++        return;
++    }
++
++    auto lvgl_theme = static_cast<LvglTheme*>(current_theme_);
++    lv_obj_t* img_bubble = lv_obj_create(content_);
++    lv_obj_set_style_radius(img_bubble, 8, 0);
++    lv_obj_set_scrollbar_mode(img_bubble, LV_SCROLLBAR_MODE_OFF);
++    lv_obj_set_style_border_width(img_bubble, 0, 0);
++    lv_obj_set_style_pad_all(img_bubble, lvgl_theme->spacing(4), 0);
++    lv_obj_set_style_bg_color(img_bubble, lvgl_theme->assistant_bubble_color(), 0);
++    lv_obj_set_style_bg_opa(img_bubble, LV_OPA_70, 0);
++    lv_obj_set_user_data(img_bubble, (void*)"image");
++
++    lv_obj_t* preview_image = lv_image_create(img_bubble);
++
++    lv_coord_t content_width = lv_obj_get_content_width(content_);
++    lv_coord_t content_height = lv_obj_get_height(content_);
++    if (content_width <= 0) {
++        content_width = LV_HOR_RES;
++    }
++    if (content_height <= 0) {
++        content_height = LV_VER_RES;
++    }
++
++    lv_coord_t max_width = content_width * 90 / 100;
++    lv_coord_t max_height = content_height * 70 / 100;
++
++    auto img_dsc = image->image_dsc();
++    lv_coord_t img_width = img_dsc->header.w;
++    lv_coord_t img_height = img_dsc->header.h;
++    if (img_width == 0 || img_height == 0) {
++        img_width = max_width;
++        img_height = max_height;
++        ESP_LOGW("LcdDisplay", "Invalid image dimensions: %ld x %ld, using default dimensions: %ld x %ld", img_width, img_height, max_width, max_height);
++    }
++
++    lv_coord_t display_width = is_landscape_ ? img_height : img_width;
++    lv_coord_t display_height = is_landscape_ ? img_width : img_height;
++    lv_coord_t zoom_w = (max_width * 256) / display_width;
++    lv_coord_t zoom_h = (max_height * 256) / display_height;
++    lv_coord_t zoom = (zoom_w < zoom_h) ? zoom_w : zoom_h;
++    if (zoom > 256) {
++        zoom = 256;
++    }
++
++    lv_image_set_src(preview_image, img_dsc);
++    lv_image_set_rotation(preview_image, is_landscape_ ? 900 : 0);
++    lv_image_set_scale(preview_image, zoom);
++
++    LvglImage* raw_image = image.release();
++    lv_obj_add_event_cb(preview_image, [](lv_event_t* e) {
++        LvglImage* img = (LvglImage*)lv_event_get_user_data(e);
++        if (img != nullptr) {
++            delete img;
++        }
++    }, LV_EVENT_DELETE, (void*)raw_image);
++
++    lv_coord_t scaled_width = (display_width * zoom) / 256;
++    lv_coord_t scaled_height = (display_height * zoom) / 256;
++    lv_obj_set_width(img_bubble, scaled_width + 16);
++    lv_obj_set_height(img_bubble, scaled_height + 16);
++    lv_obj_set_style_flex_grow(img_bubble, 0, 0);
++    lv_obj_center(preview_image);
++    lv_obj_align(img_bubble, LV_ALIGN_LEFT_MID, 0, 0);
++    lv_obj_scroll_to_view_recursive(img_bubble, LV_ANIM_ON);
++#else
++    DisplayLockGuard lock(this);
++    if (preview_image_ == nullptr) {
++        ESP_LOGE("LcdDisplay", "Preview image is not initialized");
++        return;
++    }
++
++    if (image == nullptr) {
++        esp_timer_stop(preview_timer_);
++        lv_obj_remove_flag(emoji_box_, LV_OBJ_FLAG_HIDDEN);
++        lv_obj_add_flag(preview_image_, LV_OBJ_FLAG_HIDDEN);
++        preview_image_cached_.reset();
++        if (gif_controller_) {
++            gif_controller_->Start();
++        }
++        return;
++    }
++
++    preview_image_cached_ = std::move(image);
++    auto img_dsc = preview_image_cached_->image_dsc();
++    lv_image_set_src(preview_image_, img_dsc);
++    ApplyFullscreenPreviewTransform(preview_image_, img_dsc, is_landscape_);
++    lv_obj_set_size(preview_image_, LV_HOR_RES, LV_VER_RES);
++    lv_obj_align(preview_image_, LV_ALIGN_CENTER, 0, 0);
++
++    if (gif_controller_) {
++        gif_controller_->Stop();
++    }
++    lv_obj_add_flag(emoji_box_, LV_OBJ_FLAG_HIDDEN);
++    lv_obj_remove_flag(preview_image_, LV_OBJ_FLAG_HIDDEN);
++    esp_timer_stop(preview_timer_);
++    ESP_ERROR_CHECK(esp_timer_start_once(preview_timer_, PREVIEW_IMAGE_DURATION_MS * 1000));
++#endif
++}
++
++void ZhengchenMinicamLcdDisplay::CreateSettingsMenuLocked() {
++    if (settings_menu_ != nullptr) {
++        return;
++    }
++
++    auto* screen = lv_screen_active();
++    auto* lvgl_theme = static_cast<LvglTheme*>(current_theme_);
++    auto* text_font = lvgl_theme->text_font()->font();
++    auto metrics = GetSettingsMenuMetrics(is_landscape_);
++
++    settings_menu_ = lv_obj_create(screen);
++    lv_obj_set_size(settings_menu_, LV_HOR_RES - metrics.menu_margin, LV_VER_RES - metrics.menu_margin);
++    lv_obj_align(settings_menu_, LV_ALIGN_CENTER, 0, 0);
++    lv_obj_set_style_radius(settings_menu_, 12, 0);
++    lv_obj_set_style_border_width(settings_menu_, 2, 0);
++    lv_obj_set_style_pad_left(settings_menu_, metrics.menu_pad_x, 0);
++    lv_obj_set_style_pad_right(settings_menu_, metrics.menu_pad_x, 0);
++    lv_obj_set_style_pad_top(settings_menu_, metrics.menu_pad_y, 0);
++    lv_obj_set_style_pad_bottom(settings_menu_, metrics.menu_pad_y, 0);
++    lv_obj_set_scrollbar_mode(settings_menu_, LV_SCROLLBAR_MODE_AUTO);
++    lv_obj_set_scroll_dir(settings_menu_, LV_DIR_VER);
++    lv_obj_set_flex_flow(settings_menu_, LV_FLEX_FLOW_COLUMN);
++    lv_obj_set_flex_align(settings_menu_, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
++
++    settings_title_label_ = lv_label_create(settings_menu_);
++    lv_label_set_text(settings_title_label_, metrics.title_text);
++    lv_obj_set_style_text_font(settings_title_label_, text_font, 0);
++    lv_obj_set_style_text_align(settings_title_label_, LV_TEXT_ALIGN_CENTER, 0);
++    lv_obj_set_style_text_line_space(settings_title_label_, metrics.line_space, 0);
++    lv_obj_set_width(settings_title_label_, LV_PCT(100));
++    lv_obj_set_style_pad_bottom(settings_title_label_, metrics.title_pad_bottom, 0);
++
++    for (size_t i = 0; i < menu_item_labels_.size(); ++i) {
++        auto* row = lv_obj_create(settings_menu_);
++        lv_obj_set_width(row, LV_PCT(100));
++        lv_obj_set_height(row, LV_SIZE_CONTENT);
++        lv_obj_set_style_pad_left(row, metrics.row_pad_x, 0);
++        lv_obj_set_style_pad_right(row, metrics.row_pad_x, 0);
++        lv_obj_set_style_pad_top(row, metrics.row_pad_y, 0);
++        lv_obj_set_style_pad_bottom(row, metrics.row_pad_y, 0);
++        lv_obj_set_style_border_width(row, 0, 0);
++        lv_obj_set_style_radius(row, 8, 0);
++        lv_obj_set_scrollbar_mode(row, LV_SCROLLBAR_MODE_OFF);
++        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_COLUMN);
++        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
++        menu_item_rows_[i] = row;
++
++        auto* label = lv_label_create(row);
++        lv_obj_set_width(label, LV_PCT(100));
++        lv_obj_set_style_text_font(label, text_font, 0);
++        lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_LEFT, 0);
++        lv_obj_set_style_text_line_space(label, metrics.line_space, 0);
++        lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
++        menu_item_labels_[i] = label;
++    }
++
++    lv_obj_add_flag(settings_menu_, LV_OBJ_FLAG_HIDDEN);
++}
++
++void ZhengchenMinicamLcdDisplay::ApplyMenuThemeLocked() {
++    if (settings_menu_ == nullptr) {
++        return;
++    }
++
++    auto* lvgl_theme = static_cast<LvglTheme*>(current_theme_);
++    auto* text_font = lvgl_theme->text_font()->font();
++    auto metrics = GetSettingsMenuMetrics(is_landscape_);
++
++    auto bg_color = lvgl_theme->background_color();
++    auto text_color = lvgl_theme->text_color();
++    auto border_color = lvgl_theme->border_color();
++
++    lv_obj_set_style_bg_color(settings_menu_, bg_color, 0);
++    lv_obj_set_style_bg_opa(settings_menu_, LV_OPA_90, 0);
++    lv_obj_set_style_border_color(settings_menu_, border_color, 0);
++    lv_obj_set_size(settings_menu_, LV_HOR_RES - metrics.menu_margin, LV_VER_RES - metrics.menu_margin);
++    lv_obj_set_style_pad_left(settings_menu_, metrics.menu_pad_x, 0);
++    lv_obj_set_style_pad_right(settings_menu_, metrics.menu_pad_x, 0);
++    lv_obj_set_style_pad_top(settings_menu_, metrics.menu_pad_y, 0);
++    lv_obj_set_style_pad_bottom(settings_menu_, metrics.menu_pad_y, 0);
++
++    if (settings_title_label_ != nullptr) {
++        lv_obj_set_style_text_font(settings_title_label_, text_font, 0);
++        lv_label_set_text(settings_title_label_, metrics.title_text);
++        lv_obj_set_style_text_line_space(settings_title_label_, metrics.line_space, 0);
++        lv_obj_set_style_text_color(settings_title_label_, text_color, 0);
++        lv_obj_set_style_pad_bottom(settings_title_label_, metrics.title_pad_bottom, 0);
++    }
++
++    for (size_t i = 0; i < menu_item_rows_.size(); ++i) {
++        auto* row = menu_item_rows_[i];
++        auto* label = menu_item_labels_[i];
++        if (row == nullptr || label == nullptr) {
++            continue;
++        }
++        lv_obj_set_height(row, LV_SIZE_CONTENT);
++        lv_obj_set_style_text_font(label, text_font, 0);
++        lv_obj_set_style_text_line_space(label, metrics.line_space, 0);
++        lv_obj_set_style_text_color(label, text_color, 0);
++        lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
++        lv_obj_set_style_pad_left(row, metrics.row_pad_x, 0);
++        lv_obj_set_style_pad_right(row, metrics.row_pad_x, 0);
++        lv_obj_set_style_pad_top(row, metrics.row_pad_y, 0);
++        lv_obj_set_style_pad_bottom(row, metrics.row_pad_y, 0);
++        lv_obj_set_style_radius(row, 8, 0);
++    }
++}
++
++void ZhengchenMinicamLcdDisplay::RefreshSettingsMenuLocked() {
++    if (settings_menu_ == nullptr) {
++        return;
++    }
++
++    auto* lvgl_theme = static_cast<LvglTheme*>(current_theme_);
++    auto text_color = lvgl_theme->text_color();
++    auto bg_color = lvgl_theme->background_color();
++
++    if (settings_title_label_ != nullptr) {
++        lv_label_set_text(settings_title_label_, GetSettingsMenuMetrics(is_landscape_).title_text);
++    }
++
++    for (size_t i = 0; i < menu_item_labels_.size(); ++i) {
++        auto* row = menu_item_rows_[i];
++        auto* label = menu_item_labels_[i];
++        if (row == nullptr || label == nullptr) {
++            continue;
++        }
++
++        const bool selected = static_cast<int>(i) == selected_index_;
++        lv_label_set_text(label, GetMenuLabel(static_cast<MenuItem>(i)));
++        if (selected) {
++            lv_obj_scroll_to_view(row, LV_ANIM_OFF);  // 选中项一定在屏幕里
++        }
++        lv_obj_set_style_text_color(label, selected ? bg_color : text_color, 0);
++        lv_obj_set_style_bg_color(row, selected ? text_color : bg_color, 0);
++        lv_obj_set_style_bg_opa(row, selected ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
++    }
++}
++
++void ZhengchenMinicamLcdDisplay::SetSelectedIndex(int index) {
++    const int count = static_cast<int>(MenuItem::Count);
++    if (count <= 0) {
++        selected_index_ = 0;
++        return;
++    }
++
++    if (index < 0) {
++        selected_index_ = count - 1;
++    } else if (index >= count) {
++        selected_index_ = 0;
++    } else {
++        selected_index_ = index;
++    }
++}
++
++const char* ZhengchenMinicamLcdDisplay::GetAecLabel() const {
++    return aec_getter_ != nullptr && aec_getter_() ? "开启" : "关闭";
++}
++
++const char* ZhengchenMinicamLcdDisplay::GetOrientationLabel() const {
++    return orientation_getter_ != nullptr && orientation_getter_() ? "横屏" : "竖屏";
++}
++
++const char* ZhengchenMinicamLcdDisplay::GetMenuLabel(MenuItem item) const {
++    // 陪聊项目：每项只留一行中文，四项在 240x320 竖屏上也放得下（原来中英双行加到第四项就挤出屏幕了）
++    static std::string label;
++    switch (item) {
++    case MenuItem::Aec:
++        label = std::string("语音打断：") + GetAecLabel();
++        break;
++    case MenuItem::Orientation:
++        label = std::string("屏幕方向：") + GetOrientationLabel();
++        break;
++    case MenuItem::Proactive:
++        label = std::string("主动问候：") + (proactive_getter_ != nullptr && proactive_getter_() ? "开" : "关");
++        break;
++    case MenuItem::Reprovision:
++        label = "重新配网";
++        break;
++    case MenuItem::Count:
++    default:
++        label = "";
++        break;
++    }
++    return label.c_str();
++}
+diff --git a/main/boards/zhengchen-minicam/zhengchen_minicam_lcd_display.h b/main/boards/zhengchen-minicam/zhengchen_minicam_lcd_display.h
+new file mode 100644
+index 0000000..73f183c
+--- /dev/null
++++ b/main/boards/zhengchen-minicam/zhengchen_minicam_lcd_display.h
+@@ -0,0 +1,77 @@
++#ifndef ZHENGCHEN_MINICAM_LCD_DISPLAY_H
++#define ZHENGCHEN_MINICAM_LCD_DISPLAY_H
++
++#include "display/lcd_display.h"
++
++#include <array>
++#include <cstdint>
++#include <functional>
++
++class ZhengchenMinicamLcdDisplay : public SpiLcdDisplay {
++public:
++    using SpiLcdDisplay::SpiLcdDisplay;
++
++    void SetupUI() override;
++    void SetTheme(Theme* theme) override;
++    void UpdateStatusBar(bool update_all = false) override;
++
++    void ShowSettingsMenu();
++    void HideSettingsMenu();
++    void ToggleSettingsMenu();
++    bool IsSettingsMenuVisible() const;
++
++    void SetProactiveHandlers(std::function<bool()> getter, std::function<void()> toggle_callback);
++    void SelectPreviousMenuItem();
++    void SelectNextMenuItem();
++    void ActivateSelectedMenuItem();
++
++    void SetAecHandlers(std::function<bool()> getter, std::function<void()> toggle_callback);
++    void SetOrientationHandlers(std::function<bool()> getter, std::function<void()> toggle_callback);
++    void SetReprovisionCallback(std::function<void()> callback);
++    bool IsLandscape() const;
++    int RotationDegrees() const;
++    void ToggleOrientation();
++    void SetPreviewImage(std::unique_ptr<LvglImage> image) override;
++
++private:
++    enum class MenuItem : uint8_t {
++        Aec = 0,
++        Orientation,
++        Proactive,      // 陪聊项目：白天随机几次主动问候（开/关）
++        Reprovision,
++        Count,
++    };
++
++    static constexpr const char* kSettingsNamespace = "zc_minicam";
++    // 陪聊项目：屏幕方向改成 0/90/180/270 四档循环（存 0..3），在菜单里点到正的那档
++    // 即可，开机自动恢复。注意 NVS 键名最长 15 个字符，超长会让 SetBool/SetInt
++    // 的 ESP_ERROR_CHECK 直接断言重启（之前 "lcd_landscape_v2" 就是这么栽的）
++    static constexpr const char* kRotationKey = "lcd_rot";
++    int rotation_index_ = 0;
++
++    lv_obj_t* settings_menu_ = nullptr;
++    lv_obj_t* settings_title_label_ = nullptr;
++    std::array<lv_obj_t*, static_cast<size_t>(MenuItem::Count)> menu_item_rows_ = {};
++    std::array<lv_obj_t*, static_cast<size_t>(MenuItem::Count)> menu_item_labels_ = {};
++    int selected_index_ = 0;
++
++    std::function<bool()> aec_getter_;
++    std::function<void()> aec_toggle_callback_;
++    std::function<bool()> orientation_getter_;
++    std::function<void()> orientation_toggle_callback_;
++    std::function<void()> reprovision_callback_;
++    std::function<bool()> proactive_getter_;
++    std::function<void()> proactive_toggle_callback_;
++    bool is_landscape_ = false;
++
++    void CreateSettingsMenuLocked();
++    void ApplyMenuThemeLocked();
++    void RefreshSettingsMenuLocked();
++    void SetSelectedIndex(int index);
++
++    const char* GetAecLabel() const;
++    const char* GetOrientationLabel() const;
++    const char* GetMenuLabel(MenuItem item) const;
++};
++
++#endif // ZHENGCHEN_MINICAM_LCD_DISPLAY_H
+diff --git a/main/crash_info.cc b/main/crash_info.cc
+new file mode 100644
+index 0000000..80533f2
+--- /dev/null
++++ b/main/crash_info.cc
+@@ -0,0 +1,74 @@
++#include "crash_info.h"
++#include <esp_system.h>
++#include <esp_attr.h>
++#include <esp_timer.h>
++#include <esp_log.h>
++#include <cstring>
++
++#define TAG "CrashInfo"
++#define CRUMB_MAGIC 0x43524d42u
++
++// RTC 内存：软件复位 / panic / 看门狗复位后内容还在；上电（掉电）复位后是随机值，用 magic 校验
++static RTC_NOINIT_ATTR uint32_t s_magic;
++static RTC_NOINIT_ATTR char s_crumb[48];
++static RTC_NOINIT_ATTR uint32_t s_uptime_s;
++static RTC_NOINIT_ATTR uint32_t s_boot_crashes;
++static RTC_NOINIT_ATTR uint32_t s_power_resets;
++
++static const char* s_reason = "unknown";
++static bool s_crash = false;
++static std::string s_last_crumb;
++static int s_last_uptime = -1;
++static int s_boot_crash_count = 0;
++static int s_power_reset_count = 0;
++
++void CrashInfo::Init() {
++    switch (esp_reset_reason()) {
++        case ESP_RST_POWERON:   s_reason = "power_on"; break;
++        case ESP_RST_SW:        s_reason = "sw_reset"; break;
++        case ESP_RST_PANIC:     s_reason = "panic"; s_crash = true; break;
++        case ESP_RST_INT_WDT:   s_reason = "int_wdt"; s_crash = true; break;
++        case ESP_RST_TASK_WDT:  s_reason = "task_wdt"; s_crash = true; break;
++        case ESP_RST_WDT:       s_reason = "other_wdt"; s_crash = true; break;
++        case ESP_RST_BROWNOUT:  s_reason = "brownout"; s_crash = true; break;
++        case ESP_RST_DEEPSLEEP: s_reason = "deepsleep"; break;
++        case ESP_RST_EXT:       s_reason = "external"; break;
++        case ESP_RST_USB:       s_reason = "usb"; break;
++        default:                s_reason = "unknown"; break;
++    }
++    if (s_magic == CRUMB_MAGIC) {
++        s_crumb[sizeof(s_crumb) - 1] = '\0';
++        s_last_crumb = s_crumb;
++        s_last_uptime = (int)s_uptime_s;
++        bool init_phase = (s_last_crumb == "boot" || s_last_crumb.rfind("init:", 0) == 0);
++        s_boot_crashes = (s_crash && init_phase) ? (s_boot_crashes > 100 ? 1 : s_boot_crashes + 1) : 0;
++        // 掉电复位 + 上次只跑了不到 60 秒 = 电源供不上（电池空了/线不行）。连续几次就进省电开机
++        bool short_run = (s_last_uptime >= 0 && s_last_uptime < 60);
++        bool power_reset = (esp_reset_reason() == ESP_RST_BROWNOUT) || (s_crash && short_run && init_phase);
++        s_power_resets = power_reset ? (s_power_resets > 100 ? 1 : s_power_resets + 1) : 0;
++    } else {
++        s_last_crumb = "";
++        s_last_uptime = -1;
++        s_boot_crashes = 0;
++        s_power_resets = 0;
++    }
++    s_boot_crash_count = (int)s_boot_crashes;
++    s_power_reset_count = (int)s_power_resets;
++    ESP_LOGI(TAG, "reset_reason=%s last_action=\"%s\" uptime_before=%d boot_crashes=%d power_resets=%d", s_reason, s_last_crumb.c_str(), s_last_uptime, s_boot_crash_count, s_power_reset_count);
++    s_magic = CRUMB_MAGIC;
++    s_uptime_s = 0;
++    Breadcrumb("boot");
++}
++
++void CrashInfo::Breadcrumb(const char* what) {
++    strncpy(s_crumb, what, sizeof(s_crumb) - 1);
++    s_crumb[sizeof(s_crumb) - 1] = '\0';
++    s_uptime_s = (uint32_t)(esp_timer_get_time() / 1000000);
++}
++
++const char* CrashInfo::ResetReason() { return s_reason; }
++bool CrashInfo::ResetWasCrash() { return s_crash; }
++std::string CrashInfo::LastBreadcrumb() { return s_last_crumb; }
++int CrashInfo::UptimeBeforeReset() { return s_last_uptime; }
++int CrashInfo::ConsecutiveBootCrashes() { return s_boot_crash_count; }
++int CrashInfo::ConsecutivePowerResets() { return s_power_reset_count; }
+diff --git a/main/crash_info.h b/main/crash_info.h
+new file mode 100644
+index 0000000..3c05d95
+--- /dev/null
++++ b/main/crash_info.h
+@@ -0,0 +1,15 @@
++// 陪聊项目：崩溃线索。设备放在老人家里拿不到串口日志，所以把"上次为什么重启"和
++// "重启前在干什么"记在 RTC 内存里（重启不丢、断电才丢），开机做 OTA 检查时随 JSON 上报服务器。
++#pragma once
++#include <string>
++
++namespace CrashInfo {
++void Init();                              // 开机第一件事：读复位原因、保存上次面包屑
++const char* ResetReason();                // "power_on" / "sw_reset" / "panic" / "task_wdt" / "int_wdt" / "brownout" ...
++bool ResetWasCrash();                     // panic / 看门狗 / 掉电 都算
++std::string LastBreadcrumb();             // 上次重启前最后一条面包屑
++void Breadcrumb(const char* what);        // 记一条（最多 47 字节）
++int UptimeBeforeReset();                  // 上次运行了多少秒（面包屑里带着）
++int ConsecutiveBootCrashes();             // 连续几次在开机初始化阶段崩溃（RTC 计数，正常开机后清零）
++int ConsecutivePowerResets();             // 连续几次"掉电复位且运行不到 60 秒"（电源不稳）
++}
+diff --git a/main/display/display.h b/main/display/display.h
+index e7fa6fa..5f9c878 100644
+--- a/main/display/display.h
++++ b/main/display/display.h
+@@ -99,6 +99,10 @@ protected:
+     friend class DisplayLockGuard;
+     virtual bool Lock(int timeout_ms = 0) = 0;
+     virtual void Unlock() = 0;
++
++public:
++    // 陪聊项目：主循环用来探测屏幕线程是否卡死（拿得到锁就立刻放掉）
++    bool TryProbeLock(int timeout_ms) { if (Lock(timeout_ms)) { Unlock(); return true; } return false; }
+ };
+ 
+ class DisplayLockGuard {
+diff --git a/main/idf_component.yml b/main/idf_component.yml
+index 2811b69..cfbbf89 100644
+--- a/main/idf_component.yml
++++ b/main/idf_component.yml
+@@ -24,7 +24,7 @@ dependencies:
+   # Stay below the P4 rev>=3.0 CMake gate until rev-1.x boards are retired.
+   espressif/esp_audio_effects: ~1.3.0
+   espressif/esp_audio_codec: ~2.5.0
+-  78/esp-ml307: ~3.7.0
++  # 78/esp-ml307 已改为本地组件 components/esp-ml307（加了连接/发送超时，见 esp_ssl.cc）
+   78/uart-eth-modem:
+     version: ~0.6.5
+     rules:
+diff --git a/main/main.cc b/main/main.cc
+index f7e8bc3..64d5a96 100755
+--- a/main/main.cc
++++ b/main/main.cc
+@@ -8,6 +8,7 @@
+ #include <freertos/task.h>
+ 
+ #include "application.h"
++#include "crash_info.h"
+ 
+ #define TAG "main"
+ 
+@@ -22,6 +23,8 @@ extern "C" void app_main(void)
+     }
+     ESP_ERROR_CHECK(ret);
+ 
++    CrashInfo::Init();
++
+     // Initialize and run the application
+     auto& app = Application::GetInstance();
+     app.Initialize();
+diff --git a/main/protocols/protocol.h b/main/protocols/protocol.h
+index cfa0dd2..49fe04b 100644
+--- a/main/protocols/protocol.h
++++ b/main/protocols/protocol.h
+@@ -66,6 +66,8 @@ public:
+     virtual void SendStopListening();
+     virtual void SendAbortSpeaking(AbortReason reason);
+     virtual void SendMcpMessage(const std::string& message);
++    // 陪聊项目：给服务器发一条自定义 JSON（比如"这次是主动问候"）
++    bool SendCustomText(const std::string& text) { return SendText(text); }
+ 
+ protected:
+     std::function<void(const cJSON* root)> on_incoming_json_;
+diff --git a/main/settings.cc b/main/settings.cc
+index 3b40622..a318326 100644
+--- a/main/settings.cc
++++ b/main/settings.cc
+@@ -12,7 +12,7 @@ Settings::Settings(const std::string& ns, bool read_write) : ns_(ns), read_write
+ Settings::~Settings() {
+     if (nvs_handle_ != 0) {
+         if (read_write_ && dirty_) {
+-            ESP_ERROR_CHECK(nvs_commit(nvs_handle_));
++            ESP_ERROR_CHECK_WITHOUT_ABORT(nvs_commit(nvs_handle_));
+         }
+         nvs_close(nvs_handle_);
+     }
+@@ -30,7 +30,7 @@ std::string Settings::GetString(const std::string& key, const std::string& defau
+ 
+     std::string value;
+     value.resize(length);
+-    ESP_ERROR_CHECK(nvs_get_str(nvs_handle_, key.c_str(), value.data(), &length));
++    ESP_ERROR_CHECK_WITHOUT_ABORT(nvs_get_str(nvs_handle_, key.c_str(), value.data(), &length));
+     while (!value.empty() && value.back() == '\0') {
+         value.pop_back();
+     }
+@@ -39,7 +39,7 @@ std::string Settings::GetString(const std::string& key, const std::string& defau
+ 
+ void Settings::SetString(const std::string& key, const std::string& value) {
+     if (read_write_) {
+-        ESP_ERROR_CHECK(nvs_set_str(nvs_handle_, key.c_str(), value.c_str()));
++        ESP_ERROR_CHECK_WITHOUT_ABORT(nvs_set_str(nvs_handle_, key.c_str(), value.c_str()));
+         dirty_ = true;
+     } else {
+         ESP_LOGW(TAG, "Namespace %s is not open for writing", ns_.c_str());
+@@ -60,7 +60,7 @@ int32_t Settings::GetInt(const std::string& key, int32_t default_value) {
+ 
+ void Settings::SetInt(const std::string& key, int32_t value) {
+     if (read_write_) {
+-        ESP_ERROR_CHECK(nvs_set_i32(nvs_handle_, key.c_str(), value));
++        ESP_ERROR_CHECK_WITHOUT_ABORT(nvs_set_i32(nvs_handle_, key.c_str(), value));
+         dirty_ = true;
+     } else {
+         ESP_LOGW(TAG, "Namespace %s is not open for writing", ns_.c_str());
+@@ -81,7 +81,7 @@ bool Settings::GetBool(const std::string& key, bool default_value) {
+ 
+ void Settings::SetBool(const std::string& key, bool value) {
+     if (read_write_) {
+-        ESP_ERROR_CHECK(nvs_set_u8(nvs_handle_, key.c_str(), value ? 1 : 0));
++        ESP_ERROR_CHECK_WITHOUT_ABORT(nvs_set_u8(nvs_handle_, key.c_str(), value ? 1 : 0));
+         dirty_ = true;
+     } else {
+         ESP_LOGW(TAG, "Namespace %s is not open for writing", ns_.c_str());
+@@ -92,7 +92,7 @@ void Settings::EraseKey(const std::string& key) {
+     if (read_write_) {
+         auto ret = nvs_erase_key(nvs_handle_, key.c_str());
+         if (ret != ESP_ERR_NVS_NOT_FOUND) {
+-            ESP_ERROR_CHECK(ret);
++            ESP_ERROR_CHECK_WITHOUT_ABORT(ret);
+         }
+     } else {
+         ESP_LOGW(TAG, "Namespace %s is not open for writing", ns_.c_str());
+@@ -101,7 +101,7 @@ void Settings::EraseKey(const std::string& key) {
+ 
+ void Settings::EraseAll() {
+     if (read_write_) {
+-        ESP_ERROR_CHECK(nvs_erase_all(nvs_handle_));
++        ESP_ERROR_CHECK_WITHOUT_ABORT(nvs_erase_all(nvs_handle_));
+     } else {
+         ESP_LOGW(TAG, "Namespace %s is not open for writing", ns_.c_str());
+     }
+-- 
+2.43.0
+

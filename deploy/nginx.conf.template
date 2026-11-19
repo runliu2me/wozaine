@@ -1,0 +1,85 @@
+# 我在呢 · nginx 站点配置模板（deploy/install.sh 会把 __DOMAIN__ 换成你的域名，装到 /etc/nginx/sites-available/wozaine.conf）
+# 先以 80 端口装上，再由 certbot --nginx 自动加上 443/HTTPS 和跳转。设备固件要求 HTTPS/WSS。
+server {
+    listen 80;
+    listen [::]:80;
+    server_name __DOMAIN__;
+
+    client_max_body_size 32m;   # 管理页上传固件（约 3MB）
+    server_tokens off;
+    # 注意：每个 location 里都清掉 Tailscale-User-Login 头，不让外面伪造内网身份（nginx 的 proxy_set_header 不会从 server 级继承到已有该指令的 location）
+    add_header X-Frame-Options "DENY" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "same-origin" always;
+    add_header Content-Security-Policy "default-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; style-src 'self'; script-src 'self'; connect-src 'self' ws: wss:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'" always;
+    add_header Permissions-Policy "camera=(), microphone=(self), geolocation=(), payment=(), usb=(), display-capture=()" always;
+
+    # ---- 设备侧（不需要网页登录；各接口自己用 token 保护）----
+    location /xiaozhi/ota {
+        proxy_pass http://127.0.0.1:3096;
+        proxy_set_header Host $host;
+        proxy_set_header Tailscale-User-Login "";
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_read_timeout 120s;
+    }
+    location /xiaozhi/ws {
+        proxy_pass http://127.0.0.1:3097;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header Tailscale-User-Login "";
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+    }
+
+    # ---- 管理台（公网可达，必须登录：server.py 自己做网页登录 + 会话 cookie）----
+    # 两条 WebSocket 不经过 server.py，用 auth_request 让 server.py 校验 cookie
+    location = /_auth {
+        internal;
+        proxy_pass http://127.0.0.1:3093/_auth;
+        proxy_pass_request_body off;
+        proxy_set_header Content-Length "";
+        proxy_set_header Cookie $http_cookie;
+        proxy_set_header Tailscale-User-Login "";
+    }
+    location /ws/call {
+        auth_request /_auth;
+        proxy_pass http://127.0.0.1:3095;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Tailscale-User-Login "";
+        proxy_read_timeout 3600s;
+    }
+    location /ws/intercom {
+        auth_request /_auth;
+        proxy_pass http://127.0.0.1:3098;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Tailscale-User-Login "";
+        proxy_read_timeout 3600s;
+    }
+    # 电话线路（可选）：云厂商语音智能体调用的 OpenAI 兼容接口，自己用 Bearer 口令鉴权；流式输出不能缓冲
+    location /v1/ {
+        proxy_pass http://127.0.0.1:3093;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header Tailscale-User-Login "";
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 120s;
+    }
+    location / {
+        proxy_pass http://127.0.0.1:3093;
+        proxy_set_header Host $host;
+        proxy_set_header Tailscale-User-Login "";
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_read_timeout 300s;   # 生成日报等慢接口
+    }
+}

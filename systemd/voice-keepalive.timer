@@ -1,0 +1,12 @@
+[Unit]
+Description=我在呢 · 每 3 天跑一次陪聊克隆音色保活
+
+[Timer]
+# 开机后10分钟先跑一次，之后每次跑完的3天后再跑——不用 OnCalendar，
+# 免得跟 OnUnitActiveSec 叠加变成每天都跑
+OnBootSec=10min
+OnUnitActiveSec=3d
+Persistent=true
+
+[Install]
+WantedBy=timers.target

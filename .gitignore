@@ -1,0 +1,27 @@
+# 密钥
+.env
+.env.*
+!.env.example
+# 你家自己的信息（从 *.example.* 复制后修改）
+family.json
+persona.md
+typo_seed.json
+# 运行时数据（对话、记忆、录音、日报、故事）—— 只在服务器上，永远不要提交
+data/
+public/
+# Python
+venv/
+__pycache__/
+*.pyc
+# 固件编译产物、录音样本
+*.bin
+voice_samples/
+*.mp3
+*.wav
+# 编辑器 / 系统
+.DS_Store
+.vscode/
+.idea/
+doc/
+demo-data/
+firmware/dist/

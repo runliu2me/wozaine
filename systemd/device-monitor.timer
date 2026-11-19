@@ -1,0 +1,10 @@
+[Unit]
+Description=我在呢 · 每 15 分钟检查设备是否在线
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+Unit=device-monitor.service
+
+[Install]
+WantedBy=timers.target

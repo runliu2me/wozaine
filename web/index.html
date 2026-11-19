@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 64 64%27%3E%3Ccircle cx=%2732%27 cy=%2732%27 r=%2730%27 fill=%27%23d9483b%27/%3E%3C/svg%3E">
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-title" content="我在呢" />
+<meta name="apple-mobile-web-app-status-bar-style" content="default" />
+<meta name="theme-color" content="#fafafa" media="(prefers-color-scheme: light)" /><meta name="theme-color" content="#0a0a0a" media="(prefers-color-scheme: dark)" />
+<title>我在呢</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<a class="skip" href="#main">跳到正文</a>
+<header>
+  <h1>我在呢</h1>
+  <div class="status">
+    <span id="deviceStatus" class="chip" role="status"><span class="dot"></span><span class="chip-t">设备</span></span>
+    <span id="batStatus" class="chip bat-chip" hidden title="设备电量"><span class="chip-t" id="batStatusText">–</span></span>
+    <button type="button" id="balanceStatus" class="chip bal" data-go="ops" hidden>余额 –</button>
+    <a class="hdr-link" href="/thanks" title="开源致谢与致敬">致敬</a>
+    <a class="hdr-link" id="logoutLink" href="/logout" title="退出登录">退出</a>
+  </div>
+</header>
+<div id="toast" role="status" aria-live="polite"></div>
+<main id="main">
+
+<!-- 首页：表盘。一眼状态；没事安静，有事清楚 -->
+<section class="tab active" id="tab-home" aria-label="首页">
+  <div id="homeAlerts" class="alerts" role="alert" hidden></div>
+  <div class="face" id="deviceFace" data-online="" data-bat="">
+    <div class="face-ring-wrap">
+      <svg class="face-ring" viewBox="0 0 36 36" aria-hidden="true">
+        <circle class="ring-track" cx="18" cy="18" r="15.5" />
+        <circle class="ring-value" id="batRing" cx="18" cy="18" r="15.5" pathLength="100" stroke-dasharray="0 100" />
+      </svg>
+      <div class="face-core">
+        <div class="face-state" id="homeDeviceState">…</div>
+        <div class="face-bat" id="homeBatPct">&nbsp;</div>
+      </div>
+    </div>
+    <p class="face-verdict" id="homeVerdict">正在看设备</p>
+    <p class="face-sub" id="homeDeviceHint">&nbsp;</p>
+  </div>
+
+  <div class="comps">
+    <button type="button" class="comp" id="homeYesterday" aria-label="查看昨天的记录">
+      <span class="comp-k">昨天</span>
+      <span class="comp-v" id="homeTodayCount">–</span>
+      <span class="spark" id="homeSpark" aria-hidden="true"></span>
+      <span class="comp-s" id="homeSparkCap">近 7 天</span>
+    </button>
+    <button type="button" class="comp" id="homeLiveCard" data-go="live" aria-label="去对讲">
+      <span class="comp-k">对讲</span>
+      <span class="comp-v" id="homeLiveLabel">按住说</span>
+      <span class="comp-s" id="homeLiveSub">用你自己的声音</span>
+    </button>
+  </div>
+
+  <article class="card report-card" id="homeReportCard">
+    <div class="card-head"><h2 id="homeReportTitle">日报</h2><button type="button" class="subtle" id="homeReportMore">看那天</button></div>
+    <div id="homeReport" class="report"><p class="report-glance muted">每晚自动整理一份，第二天早上在这里看。</p></div>
+  </article>
+
+  <p class="credit-line"><a href="/thanks">站在小智 AI、Silero VAD、StPageFlip 和 StoryWorth 的肩膀上 · 致敬 ›</a></p>
+</section>
+
+<!-- 对讲：用自己的声音直接说 -->
+<section class="tab" id="tab-live" aria-label="对讲">
+  <p class="page-kicker">不经过 AI，用你自己的声音直接跟<span data-elder-label>妈妈</span>说</p>
+  <div class="offline-note" id="liveOffline" hidden>设备现在不在线，要等它连上才能对讲。</div>
+  <div class="card ic-card">
+    <div class="card-head"><h2>对讲</h2><span class="ic-meta"><span id="icTimer" class="ic-timer" hidden>00:00</span><span id="icState" class="badge">未接通</span></span></div>
+    <div class="ic-stage" id="icStage" data-state="off">
+      <label class="switch" id="icSwitchWrap">
+        <span class="switch-text"><b id="icSwitchLabel">接通</b><small>接通后先只听，不会放出你的声音</small></span>
+        <input type="checkbox" id="icSwitch" role="switch" />
+        <span class="track"><span class="knob"></span></span>
+      </label>
+      <button type="button" id="icTalk" class="crown" disabled aria-pressed="false" aria-describedby="icHint">
+        <span class="crown-level" aria-hidden="true"></span>
+        <span class="crown-ring" aria-hidden="true"></span>
+        <span class="crown-label" id="icTalkLabel">按住说话</span>
+      </button>
+    </div>
+    <p class="hint ic-hint" id="icHint">先接通（只听）；按住中间的圆，<span data-elder-pronoun>她</span>才听得到你。电脑上也可以按住空格键。</p>
+  </div>
+</section>
+
+<!-- 记录 -->
+<section class="tab" id="tab-log" aria-label="记录">
+  <p class="page-kicker">选一天，看<span data-elder-pronoun>她</span>那天说了什么</p>
+  <div class="card cal-card">
+    <div class="cal-head">
+      <button type="button" class="icon-btn" id="calPrev" aria-label="上个月">‹</button>
+      <b id="calTitle"></b>
+      <button type="button" class="icon-btn" id="calNext" aria-label="下个月">›</button>
+    </div>
+    <div class="cal" id="cal" role="grid" aria-labelledby="calTitle"></div>
+    <div class="cal-legend"><span><i class="lg-cell"></i>聊得越多，颜色越深</span><span><i class="lg-today"></i>今天</span></div>
+  </div>
+  <div class="day-head">
+    <button type="button" class="icon-btn" id="dayPrev" aria-label="前一天">‹</button>
+    <div><b id="dayTitle">今天</b><small id="daySub"></small></div>
+    <button type="button" class="icon-btn" id="dayNext" aria-label="后一天">›</button>
+  </div>
+  <article class="card" id="reportCard">
+    <div class="card-head"><h2 id="reportTitle">日报</h2><button type="button" id="genReport" class="subtle">生成日报</button></div>
+    <div id="reportBody" class="report"></div>
+  </article>
+  <div class="card">
+    <div class="card-head"><h2 id="logTitle">对话</h2></div>
+    <div id="logBody"></div>
+  </div>
+</section>
+
+<!-- 故事：口述传记 -->
+<section class="tab" id="tab-story" aria-label="故事">
+  <p class="page-kicker"><span data-elder-pronoun>她</span>的一生，每次只问一件小事</p>
+  <div class="card">
+    <div class="card-head"><h2><span data-elder-label>妈妈</span>的故事</h2><span class="btn-row"><a class="subtle" href="/book">翻开那本书</a><a class="subtle" href="/api/story/export" download>导出</a></span></div>
+    <details class="help"><summary>故事是怎么攒起来的</summary><div class="hint hint-more">聊天时找合适的时机问一句往事；每晚把原话摘进传记，错字也留着，原声能回放。</div></details>
+    <div id="storyProgress" class="story-progress"></div>
+    <div class="btnrow mt-12"><button type="button" class="small secondary" id="storyRebuild">把今天的对话整理进去</button></div>
+  </div>
+  <div class="card">
+    <details id="storyAskPanel">
+      <summary>我想让 AI 问<span data-elder-label>妈妈</span><span class="badge" id="storyQCount"></span></summary>
+      <div class="inline-row mt-10">
+        <input id="storyNewQ" type="text" placeholder="比如：你和爸爸第一次约会去哪儿了？" />
+        <button type="button" id="storyAddQ" class="small">下次就问</button>
+      </div>
+      <div class="hint">你加的问题会优先问。下面是题库和进度：</div>
+      <div id="storyQList" class="mt-6"></div>
+    </details>
+  </div>
+  <div class="card">
+    <details id="storyBioPanel" open>
+      <summary>传记<span class="badge" id="storyEntryCount"></span></summary>
+      <div class="btnrow mt-10"><button type="button" class="small secondary" id="storyCopyAll">复制全部</button></div>
+      <div id="storyBio" class="mt-8"></div>
+    </details>
+  </div>
+</section>
+
+<!-- 记忆 -->
+<section class="tab" id="tab-memory" aria-label="记忆">
+  <p class="page-kicker">它记住的事；听错的字也能在这里改</p>
+  <div class="card">
+    <details id="factsPanel" open>
+      <summary>它记住的事<span class="badge" id="factsCount"></span></summary>
+      <div class="inline-row mt-10">
+        <input id="newFact" type="text" placeholder="添加一条，例如：喜欢吃芒果" />
+        <button type="button" id="addFact" class="small">添加</button>
+      </div>
+      <div class="hint">聊天时自动记，每晚整理去重。这里可以改、删、加。</div>
+      <div id="facts" class="mt-6"></div>
+    </details>
+  </div>
+  <div class="card admin-only" id="typoCard">
+    <details id="typoPanel">
+      <summary>错字本<span class="badge" id="typoCount"></span></summary>
+      <details class="help"><summary>错字本怎么用</summary><div class="hint hint-more"><span data-elder-label>妈妈</span>的话里，人名地名常被听错。确认一个正确的词后，以前和以后的记录都会改；原文留着，可以撤销。<br>
+        <b>直接改</b>：确认是错写就改。<b>看上下文</b>：交给模型逐处判断。<b>不算错</b>：撤销已改的，以后也不改。<br>
+        每晚还会按读音自动找疑似写法。</div></details>
+      <div id="typoStatus" class="hint"></div>
+      <div class="field">
+        <input id="typoRight" type="text" placeholder="正确的词，例如：小红" />
+        <input id="typoWrong" class="mt-8" type="text" placeholder="听错成什么（可不填，空格隔开；不填就按读音自动找）" />
+        <input id="typoNote" class="mt-8" type="text" placeholder="备注（可不填），例如：小儿子" />
+        <div class="btnrow mt-8"><button type="button" id="typoAdd" class="small">加进错字本</button><button type="button" id="typoRun" class="small secondary">现在跑一遍</button></div>
+      </div>
+      <div id="typoTerms"></div>
+      <details class="mt-12">
+        <summary>最近改过的话</summary>
+        <div id="typoRecent"></div>
+      </details>
+    </details>
+  </div>
+  <div class="card admin-only" id="personaCard">
+    <details>
+      <summary>人设与说话风格（persona.md）</summary>
+      <textarea id="personaText" class="code mt-10"></textarea>
+      <div class="btnrow mt-10"><button type="button" id="savePersona">保存</button></div>
+      <div class="hint">保存后不用重启，下一轮对话就生效。</div>
+    </details>
+  </div>
+</section>
+
+<!-- 维护（只有管理员看得到） -->
+<section class="tab" id="tab-ops" aria-label="维护">
+  <p class="page-kicker">余额、连通性、设备与升级</p>
+  <div class="card">
+    <div class="card-head"><h2>余额</h2></div>
+    <div id="balanceBody" class="muted">…</div>
+  </div>
+  <div class="card">
+    <div class="card-head"><h2>连通性与服务</h2></div>
+    <div id="health" class="muted">…</div>
+  </div>
+  <div class="card">
+    <div class="card-head"><h2>设备</h2></div>
+    <div id="deviceList" class="muted">…</div>
+    <div class="vol-row">
+      <span class="muted">音量 <b id="volVal">–</b></span>
+      <input id="volSlider" type="range" min="0" max="100" step="5" aria-label="设备音量" />
+      <button type="button" id="volSet" class="small">设置</button>
+    </div>
+    <div class="hint">远程调音量。听不清时先看是不是被按小了（建议 80 以上）。</div>
+    <div class="btnrow mt-12">
+      <button type="button" id="rebootDevice" class="secondary small">重启设备</button>
+      <button type="button" id="endConv" class="secondary small">结束当前对话</button>
+    </div>
+    <div class="hint">设备连上 Wi‑Fi 就会出现在这里；OTA 之后可以点「重启设备」。</div>
+  </div>
+  <div class="card">
+    <div class="card-head"><h2>重启服务</h2></div>
+    <div class="btnrow">
+      <button type="button" class="secondary small" data-restart="xiaozhi-bridge.service">设备桥接</button>
+      <button type="button" class="secondary small" data-restart="companion-realtime.service">通话服务</button>
+      <button type="button" class="secondary small" data-restart="xiaozhi-bridge.service,companion-realtime.service,companion.service">全部</button>
+    </div>
+    <div class="hint">重启桥接会短暂断开，设备会自己连回来。</div>
+  </div>
+  <div class="card">
+    <div class="card-head"><h2>OTA 固件升级</h2></div>
+    <div class="field"><label for="otaBoard">板子型号</label>
+      <input id="otaBoard" type="text" placeholder="设备上报的板型，如 zhengchen-minicam（日志里 [ota] board= 后面那个）" autocapitalize="none" /></div>
+    <div class="field"><label for="otaVersion">新版本号</label><input id="otaVersion" type="text" placeholder="例如 2.5.2，必须大于设备当前版本" /></div>
+    <div class="field"><label for="otaFile">固件文件（xiaozhi.bin）</label><input id="otaFile" type="file" accept=".bin" /></div>
+    <button type="button" id="otaStage" class="block secondary">上传并准备升级</button>
+    <div id="otaStatus" class="hint">上传后，设备下次开机自动升级；想立刻生效就再点「重启设备」。</div>
+  </div>
+  <div class="card">
+    <details>
+      <summary>接口与密钥</summary>
+      <div id="fields" class="mt-6"></div>
+      <div class="btnrow mt-6"><button type="button" id="saveConfig">保存配置</button></div>
+      <div class="hint">密钥留空就是不改。保存后相关服务会重启。</div>
+    </details>
+  </div>
+  <div class="card">
+    <details id="testPanel">
+      <summary>测试对话</summary>
+      <div class="hint mb-8">试聊和设备共用同一套人设和记忆，也会写进当天的记录。</div>
+      <div id="chatLog"><div id="chatMsgs"><div class="empty" id="chatEmpty">打字、按住说话，或者点「通话」。</div></div></div>
+      <div id="chatBar">
+        <div id="chatStatus" class="hint chat-status"></div>
+        <div class="inline-row">
+          <button type="button" id="callBtn" class="small secondary">通话</button>
+          <input id="chatText" type="text" placeholder="说点什么" autocomplete="off" />
+          <button type="button" id="chatSend" class="small" hidden>发送</button>
+          <button type="button" id="chatMic" class="small secondary">按住说话</button>
+        </div>
+      </div>
+    </details>
+  </div>
+  <p class="credit-line"><a href="/thanks">这套东西能跑起来，靠的是许多开源项目 · 致敬 ›</a></p>
+</section>
+</main>
+
+<nav aria-label="页面">
+  <a href="/home" data-tab="home" class="active">首页</a>
+  <a href="/live" data-tab="live">对讲</a>
+  <a href="/log" data-tab="log">记录</a>
+  <a href="/story" data-tab="story">故事</a>
+  <a href="/memory" data-tab="memory">记忆</a>
+  <a href="/ops" data-tab="ops" class="admin-only">维护</a>
+</nav>
+
+<script src="/app.js"></script>
+</body>
+</html>

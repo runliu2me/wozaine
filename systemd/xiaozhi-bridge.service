@@ -1,0 +1,38 @@
+[Unit]
+# 永不因为崩溃太频繁而放弃重启
+StartLimitIntervalSec=0
+Description=我在呢 · 小智AI协议桥接（OTA :3096 + WebSocket :3097）
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+# 进程每 20 秒喂一次狗（事件循环 + OTA 线程都活着才喂）；90 秒没心跳就整个拉起
+WatchdogSec=90
+MemoryMax=2G
+User=__APP_USER__
+Group=__APP_USER__
+WorkingDirectory=__APP_DIR__
+EnvironmentFile=__APP_DIR__/.env
+Environment=XIAOZHI_OTA_HOST=127.0.0.1
+Environment=XIAOZHI_OTA_PORT=3096
+Environment=XIAOZHI_WS_HOST=127.0.0.1
+Environment=XIAOZHI_WS_PORT=3097
+Environment=COMPANION_DATA_DIR=__APP_DIR__/data
+ExecStart=__APP_DIR__/venv/bin/python3 -u __APP_DIR__/xiaozhi_bridge.py
+Restart=always
+RestartSec=3
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=__APP_DIR__
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

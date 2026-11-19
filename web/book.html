@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 64 64%27%3E%3Ccircle cx=%2732%27 cy=%2732%27 r=%2730%27 fill=%27%23d9483b%27/%3E%3C/svg%3E">
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+<title>故事书</title>
+<link rel="stylesheet" href="/vendor/page-flip.css">
+<link rel="stylesheet" href="/book.css">
+</head>
+<body>
+<div id="loading">正在翻开……</div>
+<div id="stage" hidden><div id="book"></div></div>
+<div id="bar"><a href="/story">← 回到管理台</a><span id="pos"></span><button id="tocBtn">目录</button></div>
+<div id="sheet"><button class="close" id="sheetClose">×</button><div id="sheetBody"></div></div>
+<script src="/vendor/page-flip.browser.js"></script>
+<script src="/book.js"></script>
+</body>
+</html>

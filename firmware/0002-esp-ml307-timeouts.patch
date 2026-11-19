@@ -1,0 +1,70 @@
+From 14aa229d5ca6779b1a46bc53d132a746da89ef59 Mon Sep 17 00:00:00 2001
+From: wozaine contributors <wozaine@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 16:46:21 +0800
+Subject: [PATCH] =?UTF-8?q?esp=5Fssl:=20=E8=BF=9E=E6=8E=A5/=E5=8F=91?=
+ =?UTF-8?q?=E9=80=81=E5=8A=A0=E8=B6=85=E6=97=B6=EF=BC=8C=E6=8E=A5=E6=94=B6?=
+ =?UTF-8?q?=E4=BB=BB=E5=8A=A1=E6=A0=88=204K=E2=86=928K=EF=BC=88=E5=9F=BA?=
+ =?UTF-8?q?=E4=BA=8E=2078/esp-ml307=203.7.2,=201408524=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Based on esp-ml307 by 78 (https://github.com/78/esp-ml307),
+licensed under the Apache License 2.0. This file was modified:
+- esp_tls 连接 12 秒硬超时（避免 DNS/TCP/TLS 握手卡死主循环触发看门狗）
+- socket 发送 8 秒超时（链路半死时 write 不再无限阻塞）
+- ssl_receive 任务栈 4096 → 8192
+---
+ src/esp/esp_ssl.cc | 16 +++++++++++++++-
+ 1 file changed, 15 insertions(+), 1 deletion(-)
+
+diff --git a/src/esp/esp_ssl.cc b/src/esp/esp_ssl.cc
+index cb4fa00..5fbe5e4 100644
+--- a/src/esp/esp_ssl.cc
++++ b/src/esp/esp_ssl.cc
+@@ -3,6 +3,7 @@
+ #include <esp_crt_bundle.h>
+ #include <cstring>
+ #include <unistd.h>
++#include <sys/socket.h>
+ 
+ static const char *TAG = "EspSsl";
+ 
+@@ -33,6 +34,10 @@ NetworkResult<> EspSsl::Connect(const std::string& host, int port) {
+ 
+     esp_tls_cfg_t cfg = {};
+     cfg.crt_bundle_attach = esp_crt_bundle_attach;
++    // 陪聊项目（wozaine）：网络断续时 DNS/TCP/TLS 握手可能卡好几分钟，主循环被卡住就会触发任务看门狗重启
++    // （实测 last_action=prewarm_quiet:open_channel 的 task_wdt）。给连接过程一个硬上限。
++    cfg.timeout_ms = 12000;
++    cfg.non_block = false;
+ 
+     int ret = esp_tls_conn_new_sync(host.c_str(), host.length(), port, &cfg, tls_client_);
+     if (ret != 1) {
+@@ -53,13 +58,22 @@ NetworkResult<> EspSsl::Connect(const std::string& host, int port) {
+ 
+     connected_ = true;
+ 
++    // 发送也要有上限：链路半死时 write 会一直阻塞，同样卡死主循环（last_action=state:listening 的 task_wdt）
++    {
++        int sockfd = -1;
++        if (esp_tls_get_conn_sockfd(tls_client_, &sockfd) == ESP_OK && sockfd >= 0) {
++            struct timeval tv = { .tv_sec = 8, .tv_usec = 0 };
++            setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
++        }
++    }
++
+     xEventGroupClearBits(event_group_, ESP_SSL_EVENT_RECEIVE_TASK_EXIT);
+     xTaskCreate([](void* arg) {
+         EspSsl* ssl = (EspSsl*)arg;
+         ssl->ReceiveTask();
+         xEventGroupSetBits(ssl->event_group_, ESP_SSL_EVENT_RECEIVE_TASK_EXIT);
+         vTaskDelete(NULL);
+-    }, "ssl_receive", 4096, this, 1, &receive_task_handle_);
++    }, "ssl_receive", 8192, this, 1, &receive_task_handle_);  // 回调里要解析 JSON / 建任务，4K 太紧
+     return {};
+ }
+ 
+-- 
+2.43.0
+

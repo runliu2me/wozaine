@@ -1,0 +1,15 @@
+#!/bin/sh
+# 我在呢 · 管理台「重启服务」用的小脚本（由 deploy/install.sh 装到 /usr/local/sbin/wozaine-restart，属主 root）。
+# sudoers 里只放行这一个脚本，脚本只认下面三个服务名，所以服务用户拿不到别的 root 权限。
+# 用 systemd-run 开一个临时单元去 restart，这样「重启 companion.service 自己」时不会把这条命令一起杀掉。
+set -eu
+units=""
+for u in "$@"; do
+    case "$u" in
+        xiaozhi-bridge.service|companion-realtime.service|companion.service) units="$units $u" ;;
+        *) echo "不允许重启：$u" >&2; exit 2 ;;
+    esac
+done
+[ -n "$units" ] || { echo "用法：wozaine-restart <服务名>..." >&2; exit 2; }
+# shellcheck disable=SC2086
+exec systemd-run --collect --quiet --unit="wozaine-restart-$(date +%s)" -- systemctl restart $units

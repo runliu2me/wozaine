@@ -1,0 +1,10 @@
+[Unit]
+Description=我在呢 · 每小时同步一次日历（可选）
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=1h
+Unit=schedule-sync.service
+
+[Install]
+WantedBy=timers.target

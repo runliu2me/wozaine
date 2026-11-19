@@ -1,0 +1,18 @@
+{
+  "name": "我在呢",
+  "short_name": "我在呢",
+  "description": "给爸妈的 AI 陪聊：爸妈拍一下，就能听到你说「我在呢」。",
+  "start_url": "/home",
+  "display": "standalone",
+  "background_color": "#fafafa",
+  "theme_color": "#fafafa",
+  "lang": "zh-CN",
+  "icons": [
+    {
+      "src": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='30' fill='%23d9483b'/%3E%3C/svg%3E",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

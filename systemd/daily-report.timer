@@ -1,0 +1,10 @@
+[Unit]
+Description=我在呢 · 每天 23:40 生成当天对话日报
+
+[Timer]
+OnCalendar=*-*-* 23:40:00
+Persistent=true
+Unit=daily-report.service
+
+[Install]
+WantedBy=timers.target

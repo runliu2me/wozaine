@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 64 64%27%3E%3Ccircle cx=%2732%27 cy=%2732%27 r=%2730%27 fill=%27%23d9483b%27/%3E%3C/svg%3E">
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#fafafa" media="(prefers-color-scheme: light)" />
+<meta name="theme-color" content="#0a0a0a" media="(prefers-color-scheme: dark)" />
+<meta name="description" content="「我在呢」站在许多开源项目和前人想法的肩膀上。这里列出全部来源。" />
+<title>我在呢 · 致敬</title>
+<link rel="stylesheet" href="/thanks.css">
+</head>
+<body>
+<main class="sheet">
+  <p class="back"><a href="/home" id="backHome" hidden>← 回管理台</a><a href="/login" id="backLogin">← 登录</a></p>
+
+  <header class="opener">
+    <p class="eyebrow">致敬</p>
+    <h1>没有他们，<br>那台小盒子不会开口。</h1>
+    <p class="lede">「我在呢」是一个小项目。它能听、能说、能记得、能把往事写成书，靠的是下面这些人已经铺好的路。我们把每一份借来的东西都写在这里，许可证照原样保留。</p>
+    <p class="count" id="count"></p>
+  </header>
+
+  <section>
+    <h2>开源根基</h2>
+    <ul class="credits">
+      <li>
+        <div class="row"><a href="https://github.com/78/xiaozhi-esp32" rel="noopener noreferrer" target="_blank">小智 AI · xiaozhi-esp32</a><span class="lic">MIT</span></div>
+        <span class="meta">深圳芯智未来及全体贡献者</span>
+        <p>设备端的一切从这里开始：协议、音频、屏幕、联网、OTA。我们只在它上面打了一份陪聊补丁，完整源码和版权声明在上游。</p>
+      </li>
+      <li>
+        <div class="row"><a href="https://github.com/78/esp-ml307" rel="noopener noreferrer" target="_blank">esp-ml307</a><span class="lic">Apache-2.0</span></div>
+        <span class="meta">同一位作者（78）的网络组件</span>
+        <p>设备连服务器的那根线。我们给它加了连接和发送超时，免得网络半死不活时设备卡住；改动写在补丁头部。</p>
+      </li>
+      <li>
+        <div class="row"><a href="https://github.com/snakers4/silero-vad" rel="noopener noreferrer" target="_blank">Silero VAD</a><span class="lic">MIT</span></div>
+        <span class="meta">语音活动检测模型</span>
+        <p>帮服务器判断「她说完了没有」。老人说话慢、停顿多，没有它就会频频抢话。</p>
+      </li>
+      <li>
+        <div class="row"><a href="https://github.com/Nodlik/StPageFlip" rel="noopener noreferrer" target="_blank">StPageFlip</a><span class="lic">MIT</span></div>
+        <span class="meta">翻页效果</span>
+        <p>让「她的故事」在手机上能像一本真书那样，一页一页翻开。</p>
+      </li>
+      <li>
+        <div class="row"><a href="https://ui.shadcn.com/" rel="noopener noreferrer" target="_blank">shadcn/ui</a><span class="lic">MIT</span></div>
+        <span class="meta">配色与尺寸</span>
+        <p>管理台的黑白灰、圆角和间距沿用它的 neutral 色板，浅色深色一套变量。</p>
+      </li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>思路致敬</h2>
+    <ul class="credits">
+      <li>
+        <div class="row"><a href="https://www.storyworth.com/" rel="noopener noreferrer" target="_blank">StoryWorth</a><span class="lic">产品思路</span></div>
+        <p>「每次只问一个往事问题，一年攒成一本书」。我们把这份体贴搬进了每天的聊天里，原话一个字不改地留着。</p>
+      </li>
+      <li>
+        <div class="row"><span class="name">智能手表的表盘</span><span class="lic">设计思路</span></div>
+        <p>一眼可读、没事安静、有事清楚、主控件可感、电量和在线放在最前面——管理台首页照着最好的手表体验来排。</p>
+      </li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>硬件与工具链</h2>
+    <ul class="credits">
+      <li>
+        <div class="row"><span class="name">征辰 Minicam（zhengchen-minicam）</span><span class="lic">板子</span></div>
+        <p>我们家里实际在用的板，补丁和预编译 ROM 都基于它。如实说明来源，不是购物推荐；板上的摄像头我们不启用，固件里没有拍照功能。</p>
+      </li>
+      <li>
+        <div class="row"><a href="https://github.com/espressif/esp-idf" rel="noopener noreferrer" target="_blank">Espressif ESP-IDF</a><span class="lic">Apache-2.0</span></div>
+        <p>编译、烧录、出 OTA 包都靠它。</p>
+      </li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>云能力（按量付费，用你自己的账号）</h2>
+    <ul class="credits">
+      <li><div class="row"><span class="name">DeepSeek</span><span class="lic">对话</span></div><p>人设、记忆、故事题和日报背后的语言能力。</p></li>
+      <li><div class="row"><span class="name">阿里云 · 腾讯云</span><span class="lic">语音识别</span></div><p>一主一备两路，尽量不让老人对着一片沉默。</p></li>
+      <li><div class="row"><span class="name">MiniMax · 阿里 CosyVoice</span><span class="lic">声音克隆与合成</span></div><p>让设备用「你的声音」说话；一家出问题就换另一家。</p></li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>运行时与部署</h2>
+    <ul class="credits">
+      <li><div class="row"><span class="name">Python 生态</span><span class="lic">各自许可</span></div><p>onnxruntime（MIT）、numpy（BSD）、opuslib 与 libopus（BSD）、websockets（BSD）、websocket-client 与 requests（Apache-2.0）、pypinyin 与 jieba（MIT）。</p></li>
+      <li><div class="row"><a href="https://ffmpeg.org/" rel="noopener noreferrer" target="_blank">FFmpeg</a><span class="lic">LGPL/GPL</span></div><p>录音转码、MP3 转 PCM。作为外部程序调用，不随仓库分发。</p></li>
+      <li><div class="row"><span class="name">nginx · systemd · certbot</span><span class="lic">部署</span></div><p>HTTPS、进程守护、证书续期。</p></li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>许可</h2>
+    <p>「我在呢」以 <a href="https://github.com/runliu2me/wozaine/blob/main/LICENSE" rel="noopener noreferrer" target="_blank">MIT</a> 发布。第三方组件的位置、许可和来源见 <a href="https://github.com/runliu2me/wozaine/blob/main/THIRD_PARTY_NOTICES.md" rel="noopener noreferrer" target="_blank">THIRD_PARTY_NOTICES.md</a>。分发打过补丁的固件时，请一并保留上游的版权和许可声明。</p>
+  </section>
+
+  <p class="closing">谢谢每一位把代码、想法和板子公开出来的人。<br>也谢谢每一位愿意花一个周末，给爸妈搭一台的人。</p>
+</main>
+<script src="/thanks.js"></script>
+</body>
+</html>

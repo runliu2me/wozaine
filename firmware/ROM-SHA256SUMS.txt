@@ -1,0 +1,2 @@
+aeabf84a223118c2dfb4cc5cd60515d8960ebcc33cf4ab870d6802d562269933  wozaine-minicam-merged-binary.bin
+ac11a6508f0127c89847e5c15d1eb0737c60870fea39537802518be7bb6b18a9  wozaine-minicam-xiaozhi.bin
