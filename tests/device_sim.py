@@ -5,11 +5,24 @@
 """
 import asyncio
 import json
+import os
 import subprocess
+import sys
 import time
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
+import platform_compat
+platform_compat.ensure_opus_dll()
 
 import opuslib
 import websockets
+
+import bridge_media
+
+bridge_media.ensure_opuslib_ctl_argtypes()
 
 SR = 16000
 FRAME_MS = 60

@@ -15,7 +15,6 @@
 """
 
 import base64
-import fcntl
 import hashlib
 import hmac
 import io
@@ -28,6 +27,7 @@ import wave
 import requests
 
 import family
+from platform_compat import file_lock
 
 DASHSCOPE_API_KEY = os.environ.get("DASHSCOPE_API_KEY", "")
 # 百炼控制台给的业务空间地址（…/api/v1）；没配就用公共地址
@@ -70,8 +70,7 @@ def _record(field, seconds=0.0):
     记账失败绝不能影响识别本身。"""
     try:
         os.makedirs(DATA_DIR, exist_ok=True)
-        with open(USAGE_PATH + ".lock", "w") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+        with file_lock(USAGE_PATH):
             try:
                 with open(USAGE_PATH, encoding="utf-8") as f:
                     usage = json.load(f)
@@ -227,6 +226,15 @@ def tencent_balance():
 def transcribe_pcm(pcm_bytes, timeout=15):
     """pcm_bytes: 16k/16bit/单声道 PCM 原始字节。返回识别出的文字。两家都失败才抛 RuntimeError。"""
     seconds = len(pcm_bytes) / (SAMPLE_RATE * 2)
+    # 只配了腾讯云、没配阿里云时，直接走腾讯，避免每句话误记 aliyun_fail 和触发告警
+    if not DASHSCOPE_API_KEY and TENCENT_SECRET_ID and TENCENT_SECRET_KEY:
+        try:
+            text = _tencent(pcm_bytes, timeout)
+            _record("tencent", seconds)
+            return text
+        except Exception as exc:
+            _record("all_fail")
+            raise RuntimeError(f"语音识别失败（仅配置腾讯云）：{exc}") from exc
     try:
         text = _aliyun(pcm_bytes, timeout)
         _record("aliyun", seconds)
