@@ -18,7 +18,7 @@ ADMIN_USER = os.environ.get("ADMIN_USER", "admin")
 ADMIN_PASSWORD_HASH = os.environ.get("ADMIN_PASSWORD_HASH", "")
 ADMIN_SESSION_SECRET = os.environ.get("ADMIN_SESSION_SECRET", "")
 SESSION_COOKIE = "wozaine_session"
-LEGACY_SESSION_COOKIE = "mom_session"  # 开源前私有部署用过的名字，读时兼容
+LEGACY_SESSION_COOKIE = "mom_session"  # 开源前私有部署用过的旧名，登录/登出时顺便清掉
 SESSION_DAYS = 180
 # 不登录也能访问的：登录页及其资源、致敬页、图标；manifest 浏览器取的时候不带 cookie，里面也没有隐私
 PUBLIC_PATHS = {"/login", "/api/login", "/_auth", "/favicon.ico", "/login.css", "/login.js", "/thanks", "/thanks.css", "/thanks.js",
@@ -34,6 +34,7 @@ USERS_PATH = os.path.join(DATA_DIR, "users.json")
 FAMILY_DENY = {
     ("GET", "/api/admin/config"),
     ("POST", "/api/admin/config"),
+    ("GET", "/api/admin/health"),
     ("POST", "/api/admin/persona"),
     ("POST", "/api/admin/restart"),
     ("POST", "/api/device/reboot"),
@@ -103,25 +104,41 @@ def _sig(msg):
     return hmac.new(ADMIN_SESSION_SECRET.encode(), msg.encode(), hashlib.sha256).hexdigest()[:40]
 
 
-def make_session(user):
+def _pw_fingerprint(user, users=None, password_hash=None):
+    """取用户当前密码哈希的短指纹并签进会话：改密码后该账号所有旧会话立即失效，不影响其他家人。"""
+    if password_hash is not None:
+        stored = password_hash or ""
+    else:
+        acct = (users if users is not None else load_users()).get(user) or {}
+        stored = acct.get("hash") or ""
+    if not stored:
+        return ""
+    return hashlib.sha256(stored.encode("utf-8")).hexdigest()[:12]
+
+
+def make_session(user, password_hash=None):
     exp = str(int(time.time()) + SESSION_DAYS * 86400)
-    return f"{user}.{exp}.{_sig(user + '|' + exp)}"
+    fp = _pw_fingerprint(user, password_hash=password_hash)
+    msg = f"{user}|{exp}|{fp}" if fp else f"{user}|{exp}"
+    return f"{user}.{exp}.{_sig(msg)}"
 
 
 def session_user(value):
-    """返回登录的用户名；无效返回 None。兼容老格式（exp.sig = 管理员）。"""
+    """返回登录的用户名；无效、过期或改过密码后返回 None。"""
     try:
         parts = value.split(".")
-        if len(parts) == 2:
-            exp, sig = parts
-            ok = hmac.compare_digest(sig, _sig(exp)) and int(exp) > time.time()
-            return ADMIN_USER if ok else None
+        if len(parts) != 3:
+            return None
         user, exp, sig = parts
-        if (
-            hmac.compare_digest(sig, _sig(user + "|" + exp))
-            and int(exp) > time.time()
-            and user in load_users()
-        ):
+        if int(exp) <= time.time():
+            return None
+        users = load_users()
+        if user not in users:
+            return None
+        fp = _pw_fingerprint(user, users)
+        if not fp:
+            return None
+        if hmac.compare_digest(sig, _sig(f"{user}|{exp}|{fp}")):
             return user
     except Exception:
         pass
@@ -189,10 +206,10 @@ def apply_security_headers(send_header):
     send_header("Permissions-Policy", PERMISSIONS_POLICY)
 
 
-def set_session_cookies(send_header, user):
+def set_session_cookies(send_header, user, password_hash=None):
     send_header(
         "Set-Cookie",
-        f"{SESSION_COOKIE}={make_session(user)}; Max-Age={SESSION_DAYS * 86400}; "
+        f"{SESSION_COOKIE}={make_session(user, password_hash=password_hash)}; Max-Age={SESSION_DAYS * 86400}; "
         f"Path=/; HttpOnly; Secure; SameSite=Lax",
     )
     send_header(

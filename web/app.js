@@ -151,7 +151,7 @@ async function loadBalance(force) {
     chip.hidden = !low;
     if (low) { chip.textContent = '余额 ¥' + Math.floor(ds.total); chip.className = 'chip bal low'; chip.title = 'DeepSeek 余额偏低，点开去维护页'; }
     const rows = [];
-    rows.push('<div class="kv"><span>DeepSeek（对话）</span><b class="' + (low ? 'bad' : '') + '">' + (ds && ds.total !== undefined ? '¥' + ds.total.toFixed(2) : esc(ds && ds.error ? ds.error : '未配置')) + '</b></div>');
+    rows.push('<div class="kv"><span>DeepSeek（对话）</span><b class="' + (low ? 'bad' : '') + '">' + (ds && ds.total !== undefined ? '¥' + ds.total.toFixed(2) : esc(ds && (ds.note || ds.error) ? (ds.note || ds.error) : '未配置')) + '</b></div>');
     rows.push('<div class="kv"><span>MiniMax（语音）</span><b><a href="' + esc(balance.minimax.console) + '" target="_blank" rel="noopener noreferrer">去控制台看</a></b></div>');
     const tc = balance.tencent || {};
     const asr = balance.asr || { month: {}, today: {} };
@@ -791,7 +791,11 @@ async function loadHealth() {
   try {
     const h = await api('/api/admin/health');
     const rows = [];
-    for (const [u, st] of Object.entries(h.services)) rows.push('<div class="kv"><span>' + esc(NAME[u] || u) + '</span><b class="' + (st === 'active' ? 'ok' : 'bad') + '">' + (st === 'active' ? '运行中' : esc(st)) + '</b></div>');
+    for (const [u, st] of Object.entries(h.services)) {
+      const ok = st === 'active' || st === 'active (local)';
+      const text = ok ? '运行中' : (st === 'inactive (local)' ? '未启动' : st);
+      rows.push('<div class="kv"><span>' + esc(NAME[u] || u) + '</span><b class="' + (ok ? 'ok' : 'bad') + '">' + esc(text) + '</b></div>');
+    }
     rows.push('<div class="kv"><span>公网入口</span><b class="' + (h.public_entry.ok ? 'ok' : 'bad') + '">' + (h.public_entry.ok ? '正常 · ' + h.public_entry.ms + ' ms' : '不通') + '</b></div>');
     rows.push('<div class="kv"><span>桥接控制口</span><b class="' + (h.bridge.ok ? 'ok' : 'bad') + '">' + (h.bridge.ok ? '正常' : esc(h.bridge.error || '异常')) + '</b></div>');
     rows.push('<div class="kv"><span>设备</span><b class="' + (h.devices.length ? 'ok' : 'warn') + '">' + (h.devices.length ? '在线 ' + h.devices.length + ' 台' : '离线') + '</b></div>');
@@ -859,7 +863,7 @@ async function loadConfig() {
 }
 $('saveConfig').addEventListener('click', async () => {
   const fields = {}; document.querySelectorAll('#fields [data-key]').forEach((el) => { if (el.value) fields[el.dataset.key] = el.value; });
-  try { const d = await post('/api/admin/config', { fields }); toast(d.changed ? '已保存，服务正在重启' : '没有改动'); cfg = null; setTimeout(loadConfig, d.restarting ? 2500 : 0); }
+  try { const d = await post('/api/admin/config', { fields }); toast(d.changed ? (d.restarting ? '已保存，服务正在重启' : '已保存，请手动重启服务') : '没有改动'); cfg = null; setTimeout(loadConfig, d.restarting ? 2500 : 0); }
   catch (e) { toast('保存失败：' + e.message, true); }
 });
 
