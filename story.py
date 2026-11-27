@@ -22,7 +22,7 @@ import traceback
 
 import deepseek_client
 import family
-from typo_book import file_lock  # 跨进程文件锁：错字本回改故事条目时不和这里抢着写
+from platform_compat import file_lock  # 跨进程文件锁：错字本回改故事条目时不和这里抢着写
 
 DATA_DIR = os.environ.get("COMPANION_DATA_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "data"))
 STORY_DIR = os.path.join(DATA_DIR, "story")
@@ -160,11 +160,14 @@ def pick_retell(today=None):
     cand.sort(key=lambda e: (e.get("verified_at") or "", -len(e.get("quotes", [])), e.get("date", "")))
     e = cand[0]
     if not e.get("retell"):
-        prompt = (f"你是{family.CHILD_NAME}，下面是你妈妈前几天跟你讲的一段往事（她的原话和概括）。请把要跟她核对的内容拆成 **3 到 6 个小点**，"
-                  "每个点一句话、不超过 20 个字、只讲一件事，第二人称（\"你那时候……\"），大白话，家里人说话的口气，句尾带\"对吧？\"或\"是不是？\"。"
-                  "只用她说过的内容，一个细节都不要添加；地名人名年份照她说的。按事情发生的顺序排。"
-                  "严格输出 JSON：{\"points\": [\"...\", \"...\"]}\n\n"
-                  f"她回答的问题：{e.get('question', '')}\n概括：{e.get('summary', '')}\n原话：\n" + "\n".join(e.get("quotes", [])))
+        head = family.adapt_prompt(
+            "你是{child}，下面是你妈妈前几天跟你讲的一段往事（她的原话和概括）。请把要跟她核对的内容拆成 **3 到 6 个小点**，"
+            "每个点一句话、不超过 20 个字、只讲一件事，第二人称（\"你那时候……\"），大白话，家里人说话的口气，句尾带\"对吧？\"或\"是不是？\"。"
+            "只用她说过的内容，一个细节都不要添加；地名人名年份照她说的。按事情发生的顺序排。"
+            "严格输出 JSON：{{\"points\": [\"...\", \"...\"]}}\n\n"
+            "她回答的问题："
+        ).format(child=family.CHILD_NAME)
+        prompt = f"{head}{e.get('question', '')}\n概括：{e.get('summary', '')}\n原话：\n" + "\n".join(e.get("quotes", []))
         try:
             raw = deepseek_client._chat([{"role": "user", "content": prompt}], temperature=0.3).strip()
             if raw.startswith("```"):
@@ -201,28 +204,34 @@ def retell_block(e, turn=1):
     k = max(0, turn - 1)
     if k < len(pts):
         if k == 0:
-            step = f"""
-**这次是你主动喊的她，她刚应了一声。你这一句这么说：先"哎，在啊"接住她，再说"前两天你跟我讲了{e.get('chapter', '以前')}的事，我理了理，我说你听听"，然后只说第 1 点：**
-「{pts[0]}」
-**说完就停，等她回。后面的点一轮说一个，不要一口气全说。**"""
+            step = (
+                family.adapt_prompt(
+                    "\n**这次是你主动喊的她，她刚应了一声。你这一句这么说：先\"哎，在啊\"接住她，再说\"前两天你跟我讲了{chapter}的事，我理了理，我说你听听\"，然后只说第 1 点：**\n"
+                ).format(chapter=e.get("chapter", "以前"))
+                + f"「{pts[0]}」\n"
+                + family.adapt_prompt("**说完就停，等她回。后面的点一轮说一个，不要一口气全说。**")
+            )
         else:
-            step = f"""
-**这是第 {k + 1} 轮。先用一句话接住她上一句（她说对就应一声；她说不对就问"哪儿不对？"并用她的话复述确认），然后只核对下面这一点：**
-「{pts[k]}」
-**说完就停，等她回。**（一共 {len(pts)} 点，已经核到第 {k + 1} 点）"""
+            step = (
+                family.adapt_prompt(
+                    f"\n**这是第 {k + 1} 轮。先用一句话接住她上一句（她说对就应一声；她说不对就问\"哪儿不对？\"并用她的话复述确认），然后只核对下面这一点：**\n"
+                )
+                + f"「{pts[k]}」\n"
+                + family.adapt_prompt(f"**说完就停，等她回。**（一共 {len(pts)} 点，已经核到第 {k + 1} 点）")
+            )
     else:
-        step = f"""
-**所有 {len(pts)} 点都核完了（或她已经不耐烦）。这一轮：接住她上一句，真心说一句听了的感受（一句就好），然后聊回眼前的事。不要再核对了。**"""
-    return f"""
-## 这次聊天是"核实"：把你整理过的她的故事一句一句讲给她认（每轮只说一个点）
-{step}
-规矩：
+        step = family.adapt_prompt(
+            f"\n**所有 {len(pts)} 点都核完了（或她已经不耐烦）。这一轮：接住她上一句，真心说一句听了的感受（一句就好），然后聊回眼前的事。不要再核对了。**"
+        )
+    header = family.adapt_prompt("## 这次聊天是\"核实\"：把你整理过的她的故事一句一句讲给她认（每轮只说一个点）")
+    rules = family.adapt_prompt("""规矩：
 - 每轮只说一两句，说完就停。她年纪大了，一长串她记不住。
 - 她说"不对"：问"哪儿不对？"，听完用她的话重复一遍确认，别争、别解释你为什么记错。
 - 她顺着讲出了新东西：那比核对重要，先听她讲，追一小步就够；这一轮的点可以放到下一轮再核。
 - 她不想说、或者"记不得了"：就说"没事，我记着呢"，直接收尾聊回眼前的事。
 - 绝不说"记录""传记""采访"。
-"""
+""")
+    return f"\n{header}\n{step}\n{rules}"
 
 
 def _days_ago(n, today):
@@ -237,15 +246,12 @@ def prompt_block(q, proactive=False, turn=1):
         return ""
     opening = ""
     if proactive and turn == 1:
-        opening = """
+        opening = family.adapt_prompt("""
 **这次是你主动喊的她（"妈，你在吗？"），她刚应了一声。你这一句就要这么说：先"哎，在啊"接住她，然后直接说"有件事想问你"，接着把下面这个问题问出来。
 一句话里把这三步做完，不要再闲聊铺垫，不要问"吃了没"。例如："哎，在啊。妈，有件事想问你——你小时候家里的灶台是搭在哪儿的？"**
-"""
-    return f"""
-## 这次聊天里想听妈妈讲的一个故事（每次只问这一个，别贪多）
-问题：**{q['text']}**（章节：{q['chapter']}）
-{opening}
-妈妈话少、每句都短，这很正常，**一句就是收获**，不要指望她一口气讲长的。照下面做：
+""")
+    title = family.adapt_prompt("## 这次聊天里想听妈妈讲的一个故事（每次只问这一个，别贪多）")
+    body = family.adapt_prompt("""妈妈话少、每句都短，这很正常，**一句就是收获**，不要指望她一口气讲长的。照下面做：
 1. **先铺垫再问**（主动喊她的那种除外，上面已经说了直接问）：打过招呼、接住她眼前的事之后，先自己说一两句相关的小事（"我今天路过一个菜场，想起你以前……"），再把问题带出来。自己先给，她才肯给。
 2. **只要一个小细节**：不问"讲讲你小时候"，问"你小时候睡的床是木头的还是竹子的？"——给她选项，让她只用说一个词就能接上。
 3. **她答一句，你就接住那一句再往前挪一小步**：把她的话重复半句（"哦，木头的床……"），然后只追一个小问题："几个人睡？""冬天冷不冷？""谁给你盖被子？"。一次一个，不连珠炮。
@@ -254,7 +260,8 @@ def prompt_block(q, proactive=False, turn=1):
 6. **她说"不记得了""没什么"，就换个更小的问法**问一次（"那你记不记得那时候家门口有没有树？"），还是不说就放下，聊回眼前的事，这题下次再问。
 7. **每次聊两三个来回就够**，不要把一次聊天都变成问过去。她说完，真心说一句你听了的感受（一句就好，别肉麻），然后回到平常的聊天。
 8. 绝不说"我在记录""这是传记""采访"这类话，就是儿子想听妈妈讲以前的事。
-"""
+""")
+    return f"\n{title}\n问题：**{q['text']}**（章节：{q['chapter']}）\n{opening}\n{body}"
 
 
 def known_block(max_chars=30000):
@@ -265,7 +272,7 @@ def known_block(max_chars=30000):
     asked = [q for q in qs if q["asked_count"] > 0 and not q["answered"]]
     if not ents and not asked:
         return ""
-    lines = ["## 妈妈已经跟你讲过的人生故事（她自己说的，可靠。平常聊天可以自然提起；别重复问已经讲过的，要问就顺着往更细的地方问）"]
+    lines = [family.adapt_prompt("## 妈妈已经跟你讲过的人生故事（她自己说的，可靠。平常聊天可以自然提起；别重复问已经讲过的，要问就顺着往更细的地方问）")]
     by_ch = {}
     for e in ents:
         by_ch.setdefault(e.get("chapter", ""), []).append(e)
@@ -279,9 +286,9 @@ def known_block(max_chars=30000):
                 lines.append(f"  概括：{e['summary']}")
             quotes = [x for x in e.get("quotes", []) if len(x) >= 4]
             if quotes:
-                lines.append("  她的原话：" + " / ".join(quotes[:12]))
+                lines.append(f"  {family.ELDER_PRONOUN}的原话：" + " / ".join(quotes[:12]))
     if asked:
-        lines.append("### 问过但她还没讲到的题（下次可以换个更小的问法再试，别原样重复）")
+        lines.append(f"### 问过但{family.ELDER_PRONOUN}还没讲到的题（下次可以换个更小的问法再试，别原样重复）")
         for q in asked[-30:]:
             lines.append(f"- {q['text']}（问过 {q['asked_count']} 次）")
     text = "\n".join(lines)
@@ -317,7 +324,7 @@ def extract_day(date, turns, todays_q=None, retold_id=None):
     mom = [t for t in turns if t.get("role") == "user"]
     if len(mom) < 2:
         return 0
-    lines = [("妈妈：" if t["role"] == "user" else f"{family.CHILD_NAME}：") + t["text"].replace("[电话] ", "") for t in turns]
+    lines = [(f"{family.ELDER_LABEL}：" if t["role"] == "user" else f"{family.CHILD_NAME}：") + t["text"].replace("[电话] ", "") for t in turns]
     # 聊得多的日子一天几百句，分成约 9000 字一段逐段摘，别只看结尾
     chunks, cur = [], ""
     for ln in lines:
@@ -332,8 +339,14 @@ def extract_day(date, turns, todays_q=None, retold_id=None):
         retold_txt = ""
         retold = next((x for x in load_entries() if x["id"] == retold_id), None) if retold_id else None
         if retold:
-            retold_txt = f"\n今天 AI 把这段故事复述给她核实了：{retold.get('summary', '')}。请判断她的态度（对/部分不对/不对），把她更正或补充的原话记进 verification.corrections。\n"
-        prompt = EXTRACT_PROMPT.format(elder_name=family.ELDER_NAME, elder_brief=family.ELDER_BRIEF, child=family.CHILD_NAME, chapters="、".join(CHAPTERS), todays_q=(todays_q or "（无）"), dialog=dialog, retold=retold_txt)
+            retold_txt = (
+                f"\n今天 AI 把这段故事复述给{family.ELDER_PRONOUN}核实了：{retold.get('summary', '')}。"
+                f"请判断{family.ELDER_PRONOUN}的态度（对/部分不对/不对），把{family.ELDER_PRONOUN}更正或补充的原话记进 verification.corrections。\n"
+            )
+        prompt = family.adapt_prompt(EXTRACT_PROMPT).format(
+            elder_name=family.ELDER_NAME, elder_brief=family.ELDER_BRIEF, child=family.CHILD_NAME,
+            chapters="、".join(CHAPTERS), todays_q=(todays_q or "（无）"), dialog=dialog, retold=retold_txt,
+        )
         try:
             import typo_book
             hint = typo_book.prompt_hint()
@@ -361,8 +374,8 @@ def extract_day(date, turns, todays_q=None, retold_id=None):
                         x["retell"] = None   # 有更正就下次重新整理
                 save_entries(all_e)
             if v.get("corrections"):
-                entries.append({"chapter": retold.get("chapter"), "question": "（核实时她更正/补充）" + retold.get("question", ""),
-                                "quotes": v["corrections"], "summary": f"核实时她说：{v['verdict']}。", "follow_ups": []})
+                entries.append({"chapter": retold.get("chapter"), "question": f"（核实时{family.ELDER_PRONOUN}更正/补充）" + retold.get("question", ""),
+                                "quotes": v["corrections"], "summary": f"核实时{family.ELDER_PRONOUN}说：{v['verdict']}。", "follow_ups": []})
     if not entries:
         return 0
     # 每句原话对应的录音：按文字在当天的对话里找到那一句，把它的录音路径（data/ 下）记进条目。录音文件永远保留。
@@ -427,9 +440,12 @@ def generate_personal_questions(facts, max_new=3):
     known += "\n" + "\n".join("- " + (f["text"] if isinstance(f, dict) else str(f)) for f in facts[:40])
     qs_all = _load_q()
     existing = "\n".join("- " + q["text"] for q in qs_all[-80:])
-    prompt = (f"下面是妈妈（{family.ELDER_BRIEF}）已经讲过的事和我们知道的情况。请根据这些，出 " + str(max_new) +
-              " 个儿子想继续问她的小问题：每个只问一件具体的小事（人、地方、味道、当时的情形），大白话，"
-              "一句话能答上的那种，不要问感想和道理，不要和已有的题重复。\n\n她讲过的事：\n" + known +
+    head = family.adapt_prompt(
+        "下面是妈妈（{elder_brief}）已经讲过的事和我们知道的情况。请根据这些，出 {max_new} "
+        "个儿子想继续问她的小问题：每个只问一件具体的小事（人、地方、味道、当时的情形），大白话，"
+        "一句话能答上的那种，不要问感想和道理，不要和已有的题重复。\n\n她讲过的事：\n"
+    ).format(elder_brief=family.ELDER_BRIEF, max_new=max_new)
+    prompt = (head + known +
               "\n\n已有的题（别重复）：\n" + existing + "\n\n严格输出 JSON：{\"questions\": [{\"chapter\": \"从" + "、".join(CHAPTERS) +
               "里选\", \"text\": \"...\"}]}")
     try:
@@ -458,7 +474,12 @@ def generate_personal_questions(facts, max_new=3):
 # ---------------- 整理成传记 ----------------
 def compile_biography():
     ents = load_entries()
-    lines = ["# 妈妈的故事", "", f"_由“我在呢”从妈妈平时和 AI 的聊天里一点点攒出来的。引用块里是妈妈的原话（语音识别的，只按错字本改了听错的词，识别原文另存可查）；其他是整理。更新于 {time.strftime('%Y-%m-%d')}。_", ""]
+    lines = [
+        f"# {family.ELDER_LABEL}的故事",
+        "",
+        f"_由“我在呢”从{family.ELDER_LABEL}平时和 AI 的聊天里一点点攒出来的。引用块里是{family.ELDER_LABEL}的原话（语音识别的，只按错字本改了听错的词，识别原文另存可查）；其他是整理。更新于 {time.strftime('%Y-%m-%d')}。_",
+        "",
+    ]
     total = 0
     for ch in CHAPTERS:
         items = [e for e in ents if e.get("chapter") == ch]
@@ -479,13 +500,27 @@ def compile_biography():
                 lines.append(f"_{e['summary']}_")
                 lines.append("")
             for v in e.get("verifications", []):
-                lines.append(f"_核实（{v['date']}）：她说「{v['verdict']}」_")
+                lines.append(f"_核实（{v['date']}）：{family.ELDER_PRONOUN}说「{v['verdict']}」_")
                 lines.append("")
     if total == 0:
         lines.append("_还没有故事。AI 会在聊天里慢慢问。_")
     text = "\n".join(lines)
-    with open(BIO_PATH, "w", encoding="utf-8") as f:
-        f.write(text)
+    with _LOCK, file_lock(BIO_PATH):
+        orig_mode = None
+        try:
+            orig_mode = os.stat(BIO_PATH).st_mode & 0o777
+        except OSError:
+            pass
+        tmp = f"{BIO_PATH}.{os.getpid()}.{threading.get_ident()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+        if orig_mode is not None:
+            try:
+                os.chmod(tmp, orig_mode)
+            except OSError:
+                pass
+        os.replace(tmp, BIO_PATH)
     return text
 
 

@@ -8,6 +8,7 @@ TODO: DEEPSEEK_MODEL 的具体 model id（V4-Flash 上线后的正式名字）
 
 import json
 import os
+import urllib.parse
 
 import requests
 
@@ -19,6 +20,51 @@ MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
 TIMEOUT = 30
 
 
+def is_deepseek_official_api(url=None):
+    """当前对话接口是否为 DeepSeek 官方地址（仅官方地址支持 /user/balance 余额查询）。"""
+    target = (API_URL if url is None else url).strip()
+    if not target:
+        return True
+    try:
+        host = (urllib.parse.urlsplit(target).hostname or "").lower()
+    except ValueError:
+        return False
+    return host == "api.deepseek.com"
+
+
+def _parse_extra_body(raw):
+    """解析 DEEPSEEK_EXTRA_BODY（JSON 对象），用于透传兼容模型的额外参数（如关闭思考模式）。"""
+    text = (raw or "").strip()
+    if len(text) >= 2 and text[0] == text[-1] == "'":
+        text = text[1:-1].strip()
+    if not text:
+        return {}
+    try:
+        obj = json.loads(text)
+    except ValueError as exc:
+        raise ValueError(f"DEEPSEEK_EXTRA_BODY 不是合法 JSON: {exc}") from exc
+    if not isinstance(obj, dict):
+        raise ValueError('DEEPSEEK_EXTRA_BODY 必须是 JSON 对象（例如 {"thinking":{"type":"disabled"}}）')
+    return obj
+
+
+EXTRA_BODY = _parse_extra_body(os.environ.get("DEEPSEEK_EXTRA_BODY", ""))
+
+
+def _build_chat_payload(messages, temperature=0.7, model=None, stream=False):
+    payload = dict(EXTRA_BODY)
+    payload.update({
+        "model": model or MODEL,
+        "messages": messages,
+        "temperature": temperature,
+    })
+    if stream:
+        payload["stream"] = True
+    else:
+        payload.pop("stream", None)
+    return payload
+
+
 def _chat(messages, temperature=0.7, model=None, timeout=None):
     if not API_KEY:
         raise RuntimeError("DEEPSEEK_API_KEY 未配置")
@@ -28,11 +74,7 @@ def _chat(messages, temperature=0.7, model=None, timeout=None):
             "Authorization": f"Bearer {API_KEY}",
             "Content-Type": "application/json",
         },
-        json={
-            "model": model or MODEL,
-            "messages": messages,
-            "temperature": temperature,
-        },
+        json=_build_chat_payload(messages, temperature=temperature, model=model, stream=False),
         timeout=timeout or TIMEOUT,
     )
     resp.raise_for_status()
@@ -103,7 +145,7 @@ def generate_reply_stream(persona_text, facts, recent_turns, user_text):
             "Authorization": f"Bearer {API_KEY}",
             "Content-Type": "application/json",
         },
-        json={"model": MODEL, "messages": messages, "temperature": 0.7, "stream": True},
+        json=_build_chat_payload(messages, temperature=0.7, stream=True),
         timeout=TIMEOUT,
         stream=True,
     )
@@ -118,7 +160,12 @@ def generate_reply_stream(persona_text, facts, recent_turns, user_text):
         if payload.strip() == "[DONE]":
             break
         obj = json.loads(payload)
-        delta = obj["choices"][0]["delta"].get("content")
+        if obj.get("error"):
+            raise RuntimeError(f"模型流式返回报错: {obj['error']}")
+        choices = obj.get("choices") or []
+        if not choices:
+            continue
+        delta = (choices[0].get("delta") or {}).get("content")
         if delta:
             yield _enforce_style(delta)
 
@@ -141,9 +188,9 @@ MEMORY_CRITERIA = (
 
 
 def _elder(text):
-    """提示词模板里默认写的是「妈妈 / 她」；family.json 换了称呼（爸爸、姥姥……）就跟着换。
+    """提示词模板里默认写的是「妈妈 / 母亲 / 妈 / 她 / 儿子」；family.json 换了称呼就跟着换。
     只用在模板上，不要套到老人的原话上。"""
-    return text.replace("妈妈", family.ELDER_LABEL).replace("她", family.ELDER_PRONOUN)
+    return family.adapt_prompt(text)
 
 
 def _typo_hint():
@@ -169,7 +216,7 @@ def extract_facts(user_text, reply_text):
         + _typo_hint() +
         "\n\n已经记住的（有相同或相近的就不要再记）：\n"
         + ("\n".join("- " + t for t in existing) if existing else "（暂无）") +
-        f"\n\n{family.ELDER_LABEL}说：{user_text}\n儿子回复：{reply_text}\n\n"
+        f"\n\n{family.ELDER_LABEL}说：{user_text}\n{family.CHILD_ROLE}回复：{reply_text}\n\n"
         "如果有值得记的新信息，每条一行、不要编号、不要多余的话；绝大多数对话都没有，那就只回复\"无\"。"
     )
     try:
@@ -215,8 +262,8 @@ def summarize_day(date, turns):
         lines.append(f"[{(t.get('ts') or '')[11:16]}] {who}：{t.get('text', '')}")
     transcript = "\n".join(lines)
     prompt = (
-        f"下面是 {date} {family.ELDER_LABEL}和 AI 陪聊设备（用儿子{family.CHILD_NAME}的声音和身份）的全部对话记录。"
-        f"请写一份给儿子{family.CHILD_NAME}看的当日简报，用中文、口语化、要短（全文控制在 150 字以内，每段一两句话，"
+        f"下面是 {date} {family.ELDER_LABEL}和 AI 陪聊设备（用{family.CHILD_ROLE}{family.CHILD_NAME}的声音和身份）的全部对话记录。"
+        f"请写一份给{family.CHILD_ROLE}{family.CHILD_NAME}看的当日简报，用中文、口语化、要短（全文控制在 150 字以内，每段一两句话，"
         "不要逐句复述，不要客套开头），分成四段，每段用一行小标题：\n"
         "1. 今天聊了什么（一两句概括）\n"
         f"2. {family.ELDER_LABEL}的状态（情绪、身体、吃饭睡觉；没提到就写没提到）\n"

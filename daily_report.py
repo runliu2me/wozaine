@@ -12,6 +12,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import deepseek_client
+import family
 import memory_store
 import story
 
@@ -88,11 +89,11 @@ def build_story(date, turns):
         n = story.extract_day(date, turns, todays_q=(asked[-1] if asked else None), retold_id=(retold[-1] if retold else None))
         m = story.generate_personal_questions(memory_store.load_facts())
         story.compile_biography()
-        print(f"妈妈的故事：{date} 新增 {n} 条，按她讲过的事新出 {m} 道题")
+        print(f"{family.ELDER_LABEL}的故事：{date} 新增 {n} 条，按{family.ELDER_PRONOUN}讲过的事新出 {m} 道题")
         try:
             import book
             k = book.render()
-            print(f"《妈，你慢慢说》：重写了 {k} 章")
+            print(f"《{family.BOOK_TITLE}》：重写了 {k} 章")
         except Exception as exc:
             print("书渲染失败：", exc)
     except Exception as exc:
