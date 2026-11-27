@@ -1,0 +1,58 @@
+# 「我在呢」Docker Compose 配置（不影响原有的 deploy/install.sh + systemd 部署）
+#
+# 1) 零配置演示模式（不花钱、不需要硬件与密钥，浏览器打开 http://127.0.0.1:3093）：
+#      docker compose --profile demo up --build
+#    切换演示场景（ok / talking / charging / low / offline / alert）：
+#      DEMO_SCENE=low docker compose --profile demo up --build
+#
+# 2) 自托管完整模式（需先在仓库根目录准备好 .env、family.json、persona.md，且宿主机执行
+#    mkdir -p data public && chown 1000:1000 data public，容器以 UID 1000 非 root 运行）：
+#      docker compose --profile serve up -d --build
+#    说明：
+#    - .env 通过卷挂载并在入口脚本逐行加载（不用 env_file 插值），避免 ADMIN_PASSWORD_HASH 中的 $ 被误展开；
+#    - serve 模式默认关闭 ALLOW_LOCAL=0，公网部署请先用 admin_password.py 设好密码并经 Nginx/Caddy/Traefik 反代；
+#    - 在宿主机修改 .env 后请执行 docker compose --profile serve restart wozaine 生效；
+#    - 定时任务可由宿主机 cron 调用（通过入口脚本加载 .env，避免缺少密钥）：
+#        docker compose --profile serve exec -T wozaine /app/deploy/docker-entrypoint.sh python3 daily_report.py
+#        docker compose --profile serve exec -T wozaine /app/deploy/docker-entrypoint.sh python3 device_monitor.py
+
+name: wozaine
+
+services:
+  demo:
+    build: .
+    profiles: ["demo"]
+    command: ["demo"]
+    environment:
+      DEMO_SCENE: ${DEMO_SCENE:-ok}
+      COMPANION_DATA_DIR: /app/data
+      LISTEN_HOST: 0.0.0.0
+      ALLOW_LOCAL: "1"
+    ports:
+      - "127.0.0.1:3093:3093"
+
+  wozaine:
+    build: .
+    profiles: ["serve"]
+    command: ["serve"]
+    environment:
+      COMPANION_DATA_DIR: /app/data
+      LISTEN_HOST: 0.0.0.0
+      REALTIME_HOST: 0.0.0.0
+      XIAOZHI_OTA_HOST: 0.0.0.0
+      XIAOZHI_WS_HOST: 0.0.0.0
+      XIAOZHI_INTERCOM_HOST: 0.0.0.0
+      ALLOW_LOCAL: ${ALLOW_LOCAL:-0}
+    ports:
+      - "127.0.0.1:3093:3093"
+      - "127.0.0.1:3095:3095"
+      - "127.0.0.1:3096:3096"
+      - "127.0.0.1:3097:3097"
+      - "127.0.0.1:3098:3098"
+    volumes:
+      - ./data:/app/data
+      - ./public:/app/public
+      - ./.env:/app/.env
+      - ./family.json:/app/family.json:ro
+      - ./persona.md:/app/persona.md
+    restart: unless-stopped

@@ -93,7 +93,7 @@ idf.py set-target esp32s3
 idf.py build
 ```
 
-- 第一次编译要下载 70 多个组件，耗时 10–30 分钟；产物在 `build/`：应用本体 `build/xiaozhi.bin`（也是 OTA 升级包），资源包 `build/generated_assets.bin`。要一个能直接烧的整包，再执行 `idf.py merge-bin`，生成 `build/merged-binary.bin`（16MB Flash 约 10MB）。
+- 第一次编译要下载 70 多个组件，耗时 10–30 分钟；产物在 `build/`：应用本体 `build/xiaozhi.bin`（也是 OTA 升级包），资源包 `build/generated_assets.bin`。要一个能直接烧的整包，再执行 `idf.py merge-bin`，生成 `build/merged-binary.bin`（16MB Flash 约 10MB）。如果下载组件时偶发卡死，可设置 `export IDF_COMPONENT_API_TIMEOUT=30` 后重试。
 - 改过 `sdkconfig.defaults.*` 后要删掉源码根目录的 `sdkconfig`（或 `idf.py fullclean`）再编译，否则新默认值不生效。
 - **出 OTA 升级包**：设备只接受版本号比自己大的固件。编译时可用环境变量指定版本号，例如 `XIAOZHI_PROJECT_VER=2.5.1 idf.py build`。
 
@@ -146,6 +146,12 @@ Windows 上也可以用乐鑫的图形工具 Flash Download Tool，地址填 `0x
 3. 「拍一下就聊」：在该板按键回调里调用 `Application::GetInstance().StartConversation()` / `StopConversation()`。
 4. 任何板子都要做第三节里的 esp-ml307 克隆和打补丁。
 5. 本项目不用摄像头。如果你的板子带摄像头，上游板级代码会把它初始化、并注册上游自带的 `self.camera.take_photo` 工具；我们的服务器从不调用它，但想彻底关掉的话，在板级代码里别创建 `Camera`（参照 zhengchen-minicam 的做法）。
+
+**已实测的其他上游板型参考**：
+
+- **ESP32-S3-BOX-3**（`CONFIG_BOARD_TYPE_ESP32_S3_BOX_3=y`，保留 `CONFIG_USE_DEVICE_AEC=y`）：在 `563a4f0` + 本目录 `0001`/`0002` 补丁 + ESP-IDF v6.0.3 上已实测编通并完成真机唤醒词与连续多轮对话。注意两点：
+  1. 该板喇叭为 24 kHz，服务端 `.env` 建议配置 `XIAOZHI_TX_SAMPLE_RATES=<设备MAC>=24000`。
+  2. 机身左上角的物理静音键（MUTE）是自锁供电开关，按下会切断 ES7210 麦克风供电；弹起取消静音后需要重启一次设备重新初始化编解码芯片，否则麦克风会一直输出全零静音帧。
 
 ### 你用的板上游没有、也不想自己啃 C++ —— 交给 AI
 
