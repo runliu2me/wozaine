@@ -8,10 +8,7 @@
 这是一个真实在用的项目：一位老人每天都在和它聊天。我们把它清洗干净开源出来，
 希望每一个没法天天陪在爸妈身边的人，都能给家里也放一台。
 
-<sub>English: *wozaine* ("I'm here") is an open-source AI companion for elderly parents. A tiny ESP32-S3 box speaks in
-your cloned voice when your mom taps it, remembers her life, turns her stories into a book, and gives you a daily
-report on your phone. Self-hosted: all conversations stay on your own server. Docs are in Chinese; any AI coding
-assistant can deploy it by reading [AGENTS.md](AGENTS.md).</sub>
+<sub>English: [README.en.md](README.en.md) — *wozaine* ("I'm here") is an open-source, self-hosted AI voice companion for elderly parents. A tiny ESP32-S3 box speaks in your cloned voice, remembers their stories into a book, and sends daily reports to your phone. Any AI coding assistant can deploy it via [AGENTS.md](AGENTS.md).</sub>
 
 <p align="center"><img src="docs/images/book.png" alt="她的故事，被写成一本可以翻的书：左页是她的原话，右页是整理的叙述" width="100%"></p>
 <p align="center"><sub>她讲过的往事，每晚被写成一本可以翻的书——左页是她的原话（点开能听录音），右页是整理的叙述。</sub></p>
@@ -110,6 +107,7 @@ bash deploy/install.sh --domain chat.example.com --email you@example.com
 | [AGENTS.md](AGENTS.md) | AI 助手 | 从零部署的完整步骤、要向用户确认的事、验收清单 |
 | [docs/硬件.md](docs/硬件.md) | 准备买东西的人 | 需要什么板子、服务器、域名，大概多少钱 |
 | [docs/部署.md](docs/部署.md) | 自己动手的人 | 申请密钥、克隆声音、装服务器、配域名证书、常见问题 |
+| [docs/跨平台.md](docs/跨平台.md) | Docker / Windows / macOS 用户 | Docker 一键体验与自托管、Windows/macOS 本地运行与局域网联调 |
 | [docs/网络安全.md](docs/网络安全.md) | 要上公网的人 | 端口、三道门、设备口令、nginx 故意做了什么 |
 | [SECURITY.md](SECURITY.md) | 安全审稿人 | 必做清单、风险提示、漏洞报告 |
 | [firmware/README.md](firmware/README.md) | 刷固件的人 | 用哪个版本的小智固件、怎么打补丁、编译、烧录、设 OTA 地址 |

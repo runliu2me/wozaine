@@ -110,6 +110,9 @@ def check_balance(state, now):
     if not key or now - state.get("balance_checked_at", 0) < 24 * 3600:
         return
     try:
+        import deepseek_client
+        if not deepseek_client.is_deepseek_official_api(os.environ.get("DEEPSEEK_API_URL", "")):
+            return
         req = urllib.request.Request("https://api.deepseek.com/user/balance", headers={"Authorization": f"Bearer {key}"})
         with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read().decode("utf-8"))

@@ -23,23 +23,30 @@ jobs:
         run: pip install -q pyflakes && python -m pyflakes *.py tools/ tests/
       - name: 离线单元测试（不调用任何云服务）
         run: |
+          python tests/test_platform_compat.py
           python tests/test_typo_book.py
           python tests/test_safe_next.py
+          python tests/test_auth_and_storage.py
+          python tests/test_family_config.py
           python tests/test_device_gate.py
           python tests/test_bridge_media.py
+          python tests/test_bridge_session.py
+          python tests/test_deepseek_client.py
+          python tests/test_asr_client.py
           python tests/test_glance.py
       - name: 安全门禁：网页无内联脚本/样式、开源版无拍照代码
         run: |
           python tests/test_web_static.py
           python tests/test_no_camera.py
       - name: 网页脚本语法
-        run: for f in web/*.js; do node --check "$f"; done
+        run: for f in web/*.js; do node --check "$f" || exit 1; done
       - name: 模块能导入
-        run: python -c "import family, live_context, story, book, deepseek_client, asr_client, tts_client, vad, memory_store, typo_book, env_config, phone_brain, glance, web_auth, device_gate, bridge_media"
+        run: python -c "import platform_compat, family, live_context, story, book, deepseek_client, asr_client, tts_client, vad, memory_store, typo_book, env_config, phone_brain, glance, web_auth, device_gate, bridge_media"
       - name: 安装脚本检查
         run: |
           bash -n deploy/install.sh
-          shellcheck -S warning deploy/install.sh deploy/wozaine-restart
+          bash -n deploy/docker-entrypoint.sh
+          shellcheck -S warning deploy/install.sh deploy/wozaine-restart deploy/docker-entrypoint.sh
       - name: 不许提交私人文件
         run: |
           for f in .env family.json persona.md typo_seed.json; do

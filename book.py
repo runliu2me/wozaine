@@ -21,7 +21,7 @@ import story
 
 BOOK_PATH = os.path.join(story.STORY_DIR, "book.json")
 TITLE = family.BOOK_TITLE
-SUBTITLE = f"{family.ELDER_NAME}口述 · 她的儿子{family.CHILD_NAME}整理"
+SUBTITLE = f"{family.ELDER_NAME}口述 · {family.ELDER_PRONOUN}的{family.CHILD_ROLE}{family.CHILD_NAME}整理"
 
 CHAPTER_PROMPT = """你在写一本关于我母亲{elder_name}（{elder_brief}，{elder_birth}生）的书，书名《{book_title}》。
 材料是她平时和儿子"{child}"（AI 替身）聊天时讲的往事，下面是「{chapter}」这一章的全部材料：每条有编号，
@@ -69,18 +69,25 @@ def _material(entries):
         if e.get("summary"):
             lines.append(f"  概括：{e['summary']}")
         for v in e.get("verifications", []):
-            lines.append(f"  核实（{v.get('date', '')}）她说「{v.get('verdict', '')}」" + ("；更正：" + " / ".join(v.get("corrections", [])) if v.get("corrections") else ""))
+            lines.append(f"  核实（{v.get('date', '')}）{family.ELDER_PRONOUN}说「{v.get('verdict', '')}」" + ("；更正：" + " / ".join(v.get("corrections", [])) if v.get("corrections") else ""))
     return "\n".join(lines)
 
 
 def _hash(entries):
-    return hashlib.md5(json.dumps(entries, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:12]
+    # 默认「妈妈/儿子」保持原有哈希以兼容已渲染章节；改了称谓/角色后自动触发对应章节重渲染
+    raw = json.dumps(entries, ensure_ascii=False, sort_keys=True)
+    if family.ELDER_LABEL != "妈妈" or family.ELDER_PRONOUN != "她" or family.CHILD_ROLE != "儿子":
+        raw = f"{family.ELDER_LABEL}|{family.ELDER_FORMAL}|{family.ELDER_PRONOUN}|{family.CHILD_ROLE}|{raw}"
+    return hashlib.md5(raw.encode("utf-8")).hexdigest()[:12]
 
 
 def render_chapter(chapter, entries):
     n_para = max(3, min(12, 2 + len(entries)))
-    prompt = CHAPTER_PROMPT.format(elder_name=family.ELDER_NAME, elder_brief=family.ELDER_BRIEF, elder_birth=family.ELDER_BIRTH,
-                                   book_title=family.BOOK_TITLE, child=family.CHILD_NAME, chapter=chapter, n_para=n_para, material=_material(entries)[-24000:])
+    prompt = family.adapt_prompt(CHAPTER_PROMPT).format(
+        elder_name=family.ELDER_NAME, elder_brief=family.ELDER_BRIEF, elder_birth=family.ELDER_BIRTH,
+        book_title=family.BOOK_TITLE, child=family.CHILD_NAME, chapter=chapter, n_para=n_para,
+        material=_material(entries)[-24000:],
+    )
     raw = deepseek_client._chat([{"role": "user", "content": prompt}], temperature=0.5).strip()
     if raw.startswith("```"):
         raw = raw[raw.find("{"):raw.rfind("}") + 1]

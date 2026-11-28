@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """小智AI协议桥接：让 xiaozhi-esp32 官方固件（不用改固件源码）直接对接咱们自己的
-讯飞识别 + DeepSeek对话 + MiniMax克隆语音这套后端，不用重新发明设备端的音频/网络栈。
+语音识别 + DeepSeek对话 + MiniMax克隆语音这套后端，不用重新发明设备端的音频/网络栈。
 
 协议是设备固件（main/protocols/websocket_protocol.cc、main/ota.cc）里读出来的，两层：
 1. OTA 接口（HTTP POST）：设备开机先访问这个，上报设备信息，我们回一段 JSON，
@@ -9,7 +9,7 @@
 2. WebSocket 音频通道：设备连上后先发一句 JSON "hello" 握手，我们必须在10秒内
    回一句 "hello" 确认，之后设备开始发 **Opus 编码**的语音二进制帧（60ms/帧，16kHz单声道），
    我们回复也是同样格式的 Opus 二进制帧。这个编码格式是固件写死的，改不了，
-   所以这层"翻译"（Opus解码给讯飞、Opus编码送回设备）是必须做的，不是我们选的。
+   所以这层"翻译"（Opus解码给语音识别、Opus编码送回设备）是必须做的，不是我们选的。
 
 断句/打断逻辑**不用**我们自己的 VAD——设备按钮按下/松开时，固件会主动发一条
 {"type":"listen","state":"start"/"stop"} 的信号（main/protocols/protocol.cc），
@@ -31,10 +31,13 @@ import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import platform_compat
+platform_compat.ensure_opus_dll()
+
 import opuslib
 import websockets
-
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import deepseek_client
 import family
@@ -47,22 +50,24 @@ import typo_book
 import device_gate
 import bridge_media
 
+bridge_media.ensure_opuslib_ctl_argtypes()
+
 OTA_HOST = os.environ.get("XIAOZHI_OTA_HOST", "127.0.0.1")
 OTA_PORT = int(os.environ.get("XIAOZHI_OTA_PORT", "3096"))
 WS_HOST = os.environ.get("XIAOZHI_WS_HOST", "127.0.0.1")
 WS_PORT = int(os.environ.get("XIAOZHI_WS_PORT", "3097"))
-# 设备最终要能连到的公网 WebSocket 地址——这个要走 ten 服务器转发，不是内网地址
+# 设备最终要能连到的公网 WebSocket 地址（经 nginx HTTPS 反代转发）
 PUBLIC_WS_URL = os.environ.get("XIAOZHI_PUBLIC_WS_URL", "wss://CHANGE_ME/xiaozhi/ws")
 DEVICE_TOKEN = device_gate.DEVICE_TOKEN  # 设备口令：OTA 下发，WS 带 Authorization: Bearer
 # 设为 1 才真正拒绝没带口令的设备（设备在开机做 OTA 检查时会拿到口令，所以先下发、确认两台都带上了再打开）
 REQUIRE_DEVICE_TOKEN = device_gate.REQUIRE_DEVICE_TOKEN
 # 只有这些设备（MAC）能拿到设备口令、能连 WebSocket；其他人 POST OTA 接口只会拿到时间和地址，连不上
 ALLOWED_DEVICE_IDS = device_gate.ALLOWED_DEVICE_IDS
-# 电量提醒：设备报电量低于 LOW_BATTERY_PCT 且没在充电 → AI 开口"妈，我快没电了…"；之后每 30 分钟最多提醒一次，
+# 电量提醒：设备报电量低于 LOW_BATTERY_PCT 且没在充电 → AI 开口提醒充电；之后每 30 分钟最多提醒一次，
 # 低于 CRIT 时每 10 分钟；插上电就安静。电量通过固件的 get_device_status 每 2 分钟查一次。
 LOW_BATTERY_PCT = int(os.environ.get("XIAOZHI_LOW_BATTERY_PCT", "20"))
 CRIT_BATTERY_PCT = int(os.environ.get("XIAOZHI_CRIT_BATTERY_PCT", "10"))
-LOW_BATTERY_TEXT = "妈，我快没电了，帮我接上充电线，给我充充电吧。"
+LOW_BATTERY_TEXT = family.LOW_BATTERY_TEXT
 TURN_DEADLINE_SECONDS = int(os.environ.get("XIAOZHI_TURN_DEADLINE", "90"))  # 一轮（识别+生成+合成+播放）最多这么久，超了强制复位，防止设备永远"处理中"
 
 # ---- 测试用故障注入（只在 XIAOZHI_TEST_FAULTS 设了才生效，生产环境永远为空）----
@@ -81,7 +86,7 @@ def _test_fault(name):
         time.sleep(3600)
     if mode == "slow":
         time.sleep(20)
-FALLBACK_TEXT = "妈，我这边网络有点不好，你等一会儿再拍一下按钮找我。"
+FALLBACK_TEXT = family.FALLBACK_TEXT
 LAST_SEEN = {}  # device_id -> 最近一次收到设备消息的时间（给离线告警用）
 BOOTS = collections.defaultdict(lambda: collections.deque(maxlen=30))
 _STORY_ASKED_TODAY = collections.deque(maxlen=50)   # 今天各场对话里问过的故事题/核实的故事（daily_report 取走做提取）
@@ -120,7 +125,7 @@ MAIN_LOOP = None
 
 # 互动：对讲
 INTERCOM_HOST = os.environ.get("XIAOZHI_INTERCOM_HOST", "127.0.0.1")
-INTERCOM_PORT = int(os.environ.get("XIAOZHI_INTERCOM_PORT", "3098"))  # 手机端对讲 WebSocket（tailscale serve :8459）
+INTERCOM_PORT = int(os.environ.get("XIAOZHI_INTERCOM_PORT", "3098"))  # 手机端对讲 WebSocket（经 nginx / Tailscale 反代）
 # 半双工：按住说话时设备喇叭在放我的声音，麦克风又收进去传回来 = 自己听自己，很炸。
 # 所以开麦期间（以及松开后的这一小段尾巴里，设备喇叭还有没播完的我的声音）不再把设备的声音回传给自己。
 INTERCOM_HANGOVER = float(os.environ.get("XIAOZHI_INTERCOM_HANGOVER", "0.6"))  # 单位秒
@@ -176,29 +181,11 @@ OPUS_BITRATE_24K = 64000  # 24k 下行用
 TTS_GAIN_DB = float(os.environ.get("XIAOZHI_TTS_GAIN_DB", "0"))  # 下发给设备前整体抬多少分贝
 SEND_LEAD_FRAMES = 8      # 每段语音开头先抢发 8 帧（~480ms）垫底，之后匀速；设备缓冲上限 20 帧
 
-# 拍一下之后 AI 先开口的招呼语，随机挑一句（风格跟 persona.md 一致：叫"妈"，不用"您"）
-GREETINGS = [
-    # 产品就叫"在呢"：每一句开场白第一句都是"妈，我在呢"，后面再接一句别的
-    "妈，我在呢。有什么事儿吗？",
-    "妈，我在呢。想我了？",
-    "妈，我在呢。今天怎么样？",
-    "妈，我在呢。吃饭了没？",
-    "妈，我在呢。刚忙完，你说。",
-    "妈，我在呢。怎么啦？",
-    "妈，我在呢。你说，我听着。",
-    "妈，我在呢。今天感觉怎么样？",
-    "妈，我在呢。慢慢说，不急。",
-    "妈，我在呢。今天出去转了没？",
-]
-
+# 拍一下之后 AI 先开口的招呼语，按 family.json 的 elder_call 生成（也可在 family.json 自定义 greetings）
+GREETINGS = family.GREETINGS
 
 # 设备白天主动喊人（固件里的"主动问候"，白天 10–21 点随机 6–7 次）：开场白用这一组
-# 主动问候= AI 带着一个好奇心来找她：只喊一句"妈，你在吗？"，她一应声，
-# 就接"在啊，有件事想问你……"直接进入故事问题（见 story.prompt_block(proactive=True)）
-PROACTIVE_GREETINGS = [
-    "妈，你在吗？",
-    "妈，在吗？",
-]
+PROACTIVE_GREETINGS = family.PROACTIVE_GREETINGS
 
 
 def load_persona():
@@ -424,6 +411,7 @@ class DeviceSession:
         self.battery = None          # {"level": 0-100, "charging": bool}
         self.low_battery_said_at = 0.0
         self.story_q = None          # 这场对话里要问的故事问题（StoryWorth 式口述传记，见 story.py）
+        self.story_entry = None      # "核实"模式：这场要讲给她听的那段故事
         self.story_after_turns = 1   # 妈妈说了几句之后才把故事题给模型
         self.proactive_story = False
         self.user_turns = 0
@@ -432,6 +420,7 @@ class DeviceSession:
         self.intercom_ws = None        # 手机端连接；不为 None 时设备麦克风声音直接转发给手机，不做识别
         self.intercom_talking = False  # 手机端开麦中（设备处于 Speaking，在播手机传来的声音）
         self._intercom_buf = bytearray()
+        self._intercom_stopped_at = 0.0
 
         self.opus_decoder = opuslib.Decoder(SAMPLE_RATE, 1)
         # 下行采样率按设备定（见 DEVICE_TX_SAMPLE_RATES）
@@ -505,7 +494,7 @@ class DeviceSession:
                         ok, _ = await self.push_speech(LOW_BATTERY_TEXT)
                         if ok:
                             self.low_battery_said_at = time.time()
-                            sys.stderr.write(f"[battery] {self.device_id}: {b['level']}% not charging -> reminded mom\n")
+                            sys.stderr.write(f"[battery] {self.device_id}: {b['level']}% not charging -> reminded elder\n")
                             if b["level"] <= CRIT_BATTERY_PCT:
                                 raise_alert("device_battery", f"{family.ELDER_LABEL}的设备电量只剩 {b['level']}%，没在充电，已经提醒{family.ELDER_PRONOUN}接充电线", cooldown=3600)
             except websockets.exceptions.ConnectionClosed:
@@ -530,6 +519,20 @@ class DeviceSession:
         if self.intercom_talking:
             await self.intercom_talk(False)
         self.intercom_ws = None
+        self._intercom_stopped_at = time.time()
+        self.conversation_active = False
+        self.cancel_event.set()
+        while not self.out_queue.empty():
+            try:
+                self.out_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+        self.listen_mode = "manual"
+        self.vad_in_speech = False
+        self.vad_buf = bytearray()
+        self.preroll.clear()
+        self.frame_buf = []
+        self.state = "listening"
         await self.send_json({"type": "system", "command": "stop_intercom"})
 
     async def intercom_talk(self, on):
@@ -635,7 +638,13 @@ class DeviceSession:
         state = data.get("state")
         if state == "start":
             mode = data.get("mode", "manual")
-            self.listen_mode = "auto" if mode == "auto" else "manual"
+            is_intercom = (mode == "realtime" and self.intercom_ws is not None)
+            if mode == "realtime" and not is_intercom and (time.time() - getattr(self, "_intercom_stopped_at", 0.0)) < 2.0:
+                # 对讲刚挂断瞬间设备可能才回包 start_intercom 触发的 realtime/start，丢弃以免误触发 AI 开场白
+                return
+            # 开启设备端 AEC 的小智板子（如 ESP32-S3-BOX-3）走默认按键/唤醒词时会发 mode="realtime"；
+            # 只有管理页主动发起的对讲（intercom_ws 非空）才走透明转发，其余按 auto（VAD 连续对话）处理。
+            self.listen_mode = "realtime" if is_intercom else ("auto" if mode in ("auto", "realtime") else "manual")
             was_busy = self.state in ("processing", "ai_speaking")
             if was_busy:
                 # 设备正在处理/说话的时候又来了一条 start —— 这是用户按钮打断，
@@ -647,9 +656,8 @@ class DeviceSession:
                     except asyncio.QueueEmpty:
                         break
             self.last_activity = time.time()
-            if mode == "realtime":
+            if is_intercom:
                 # 对讲模式（管理页发起）：设备麦克风常开，声音直接转发手机，不识别、不打招呼
-                self.listen_mode = "realtime"
                 self.conversation_active = False
                 self.state = "user_speaking"
                 return
@@ -762,6 +770,11 @@ class DeviceSession:
             return False, f"设备正忙（{self.state}），稍后再试"
         if self.vad_in_speech:
             return False, f"{family.ELDER_LABEL}正在说话，稍后再试"
+        if not self.conversation_active:
+            self.user_turns = 0
+            self.story_entry = None
+            self.story_q = None
+            self.proactive_story = False
         self.listen_mode = "auto"
         self.conversation_active = True
         self.last_activity = time.time()
@@ -860,12 +873,16 @@ class DeviceSession:
             _test_fault("asr")
             user_text = asr_client.transcribe_pcm(pcm)
         except Exception as exc:
+            if cancel_event.is_set():
+                return
             sys.stderr.write(f"[asr] {self.device_id}: 识别失败: {exc}\n")
             _note_upstream_error(exc)
             self._emit({"__kind__": "error", "error": f"识别出错: {exc}"})
             self._speak_fallback(cancel_event, tts_started=False)
             self._emit({"__kind__": "json", "type": "tts", "state": "stop"})
             self._rearm_after_turn()
+            return
+        if cancel_event.is_set():
             return
         user_text = user_text.strip()
         if not user_text:
@@ -1059,10 +1076,10 @@ def _note_upstream_error(exc):
     low = msg.lower()
     if "合成都失败" in msg:
         raise_alert("tts_down", "MiniMax 和阿里 CosyVoice 语音合成都失败，设备发不出声音了！" + msg[:300])
-    elif "识别都失败" in msg:
+    elif "识别都失败" in msg or "语音识别失败（仅配置腾讯云）" in msg:
         # 教训：旧规则只认个别错误码时，主备都挂了也可能没人知道。
-        # 现在不猜错误码：主备两家识别都失败就告警（主线路单独失败由 asr_client 自己告警）
-        raise_alert("asr_down", "阿里云和腾讯云语音识别都失败，设备听不懂老人说话了！" + msg[:300])
+        # 现在不猜错误码：主备两家识别都失败（或仅配腾讯云且失败）就告警（主线路单独失败由 asr_client 自己告警）
+        raise_alert("asr_down", "语音识别不可用，设备听不懂老人说话了！" + msg[:300])
     elif "insufficient balance" in low or "1008" in msg:
         raise_alert("minimax_balance", "MiniMax（克隆声音）账户余额不足，设备现在发不出声音！请马上充值：platform.minimaxi.com")
     elif "402" in msg or "Insufficient" in msg:

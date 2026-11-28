@@ -23,9 +23,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import shutil
 import subprocess
 import threading
 
+import platform_compat
 import deepseek_client
 import family
 import tts_client
@@ -62,7 +64,7 @@ MAX_AUDIO = 8 * 1024 * 1024
 
 
 def webm_to_pcm16k(webm_bytes):
-    """浏览器录的音频（webm/opus 等）转成讯飞要的 16k/16bit/单声道 PCM"""
+    """浏览器录的音频（webm/opus 等）转成语音识别需要的 16k/16bit/单声道 PCM"""
     proc = subprocess.run(
         ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", "pipe:0",
          "-ar", "16000", "-ac", "1", "-f", "s16le", "pipe:1"],
@@ -181,7 +183,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self._security_headers()
         sys.stderr.write(f"[login] ok {user} from {ip}\n")
-        web_auth.set_session_cookies(self.send_header, user)
+        web_auth.set_session_cookies(self.send_header, user, password_hash=acct["hash"])
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
@@ -632,7 +634,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(500, {"error": str(exc)})
             return
         restarted = False
-        if changed:
+        if changed and platform_compat.can_systemd_restart(RESTART_CMD[2]):
             # 这个重启命令要包含"重启我自己"（companion.service）——如果直接从本进程
             # subprocess.run 发，systemctl restart 会把本服务所在的 cgroup 一起杀掉，
             # 连带杀死这条重启命令本身，导致排在后面的 companion-realtime 根本没被重启到。
@@ -769,13 +771,29 @@ class Handler(BaseHTTPRequestHandler):
     # ---------------- 维护：服务状态 / 连通性 / 重启 ----------------
     def _handle_health(self):
         checks = {}
+        has_systemctl = os.name != "nt" and shutil.which("systemctl") is not None
+        local_ports = {
+            "companion.service": (LISTEN_HOST, LISTEN_PORT),
+            "companion-realtime.service": (
+                os.environ.get("REALTIME_HOST", "127.0.0.1"),
+                int(os.environ.get("REALTIME_PORT", "3095")),
+            ),
+            "xiaozhi-bridge.service": (
+                os.environ.get("XIAOZHI_OTA_HOST", "127.0.0.1"),
+                int(os.environ.get("XIAOZHI_OTA_PORT", "3096")),
+            ),
+        }
         for unit in SERVICES:
-            try:
-                r = subprocess.run(["systemctl", "is-active", unit], capture_output=True, text=True, timeout=5)
-                checks[unit] = r.stdout.strip() or r.stderr.strip()
-            except Exception as exc:
-                checks[unit] = f"error: {exc}"
-        # 公网入口（腾讯云 ten → frp → 本机）是否通
+            if has_systemctl:
+                try:
+                    r = subprocess.run(["systemctl", "is-active", unit], capture_output=True, text=True, timeout=5)
+                    checks[unit] = r.stdout.strip() or r.stderr.strip()
+                except Exception as exc:
+                    checks[unit] = f"error: {exc}"
+            else:
+                host, port = local_ports.get(unit, ("127.0.0.1", 0))
+                checks[unit] = "active (local)" if platform_compat.check_local_port(host, port) else "inactive (local)"
+        # 公网反代入口是否通
         t0 = time.time()
         try:
             req = urllib.request.Request(PUBLIC_OTA_URL, data=b"{}", method="POST",
@@ -820,6 +838,9 @@ class Handler(BaseHTTPRequestHandler):
         units = [u for u in wanted if u in SERVICES]
         if not units:
             self._send_json(400, {"error": "没有指定要重启的服务"})
+            return
+        if not platform_compat.can_systemd_restart(RESTART_CMD[2]):
+            self._send_json(400, {"ok": False, "error": "当前环境不支持 systemd 自动重启，请手动重启进程"})
             return
         # companion.service（我自己）必须排最后，且用 systemd-run 脱离本 cgroup（见 _handle_admin_config_post 的说明）
         units.sort(key=lambda u: u == "companion.service")
@@ -889,15 +910,18 @@ def _get_balances():
            "tencent": {"console": "https://console.cloud.tencent.com/expense/overview"}, "checked_at": time.strftime("%H:%M")}
     key = os.environ.get("DEEPSEEK_API_KEY", "")
     if key:
-        try:
-            req = urllib.request.Request("https://api.deepseek.com/user/balance", headers={"Authorization": f"Bearer {key}"})
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-            info = (data.get("balance_infos") or [{}])[0]
-            out["deepseek"] = {"currency": info.get("currency", "CNY"), "total": float(info.get("total_balance", 0) or 0),
-                               "available": bool(data.get("is_available", True))}
-        except Exception as exc:
-            out["deepseek"] = {"error": str(exc)[:80]}
+        if deepseek_client.is_deepseek_official_api(os.environ.get("DEEPSEEK_API_URL") or deepseek_client.API_URL):
+            try:
+                req = urllib.request.Request("https://api.deepseek.com/user/balance", headers={"Authorization": f"Bearer {key}"})
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                info = (data.get("balance_infos") or [{}])[0]
+                out["deepseek"] = {"currency": info.get("currency", "CNY"), "total": float(info.get("total_balance", 0) or 0),
+                                   "available": bool(data.get("is_available", True))}
+            except Exception as exc:
+                out["deepseek"] = {"error": str(exc)[:80]}
+        else:
+            out["deepseek"] = {"note": "自定义接口，请到服务商控制台查看"}
     try:
         out["tencent"]["total"] = asr_client.tencent_balance()
     except Exception as exc:

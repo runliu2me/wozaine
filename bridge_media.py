@@ -12,6 +12,27 @@ import sys
 import threading
 
 
+def ensure_opuslib_ctl_argtypes(enc_api=None, dec_api=None):
+    """为 opuslib 的变参 C 接口补齐固定参数签名。
+
+    libopus 的 opus_encoder_ctl / opus_decoder_ctl 是变参函数（...），
+    opuslib 3.0.1 未声明 argtypes；在 Apple Silicon（macOS arm64）上，
+    ctypes 只有在声明固定参数 argtypes 后才会按 ABI 将变参压栈，
+    否则设置 bitrate / complexity 会读到栈垃圾值，导致参数失效、抛 OpusError 或崩溃。
+    """
+    import ctypes
+
+    if enc_api is None:
+        import opuslib.api.encoder as enc_api
+    if dec_api is None:
+        import opuslib.api.decoder as dec_api
+
+    if getattr(enc_api.libopus_ctl, "argtypes", None) is None:
+        enc_api.libopus_ctl.argtypes = (enc_api.EncoderPointer, ctypes.c_int)
+    if getattr(dec_api.libopus_ctl, "argtypes", None) is None:
+        dec_api.libopus_ctl.argtypes = (dec_api.DecoderPointer, ctypes.c_int)
+
+
 def resample_pcm_16k(pcm_bytes, to_rate):
     """16k PCM → 设备下行采样率（线性插值，对讲够用）。"""
     if to_rate == 16000 or not pcm_bytes:
@@ -55,7 +76,11 @@ class FallbackOpusCache:
         self._lock = threading.Lock()
 
     def frames(self, rate, frame_samples, gain_db):
+        import platform_compat
+        platform_compat.ensure_opus_dll()
         import opuslib
+
+        ensure_opuslib_ctl_argtypes()
 
         with self._lock:
             if rate in self._cache:
@@ -63,15 +88,32 @@ class FallbackOpusCache:
             d = os.path.join(self.data_dir, "fallback")
             os.makedirs(d, exist_ok=True)
             path = os.path.join(d, f"{rate}.pcm")
+            meta_path = os.path.join(d, f"{rate}.txt")
             pcm = None
+            legacy_default_text = "妈，我这边网络有点不好，你等一会儿再拍一下按钮找我。"
             if os.path.exists(path):
-                with open(path, "rb") as f:
-                    pcm = f.read()
-            else:
+                cached_text = None
+                if os.path.exists(meta_path):
+                    try:
+                        with open(meta_path, "r", encoding="utf-8") as mf:
+                            cached_text = mf.read().strip()
+                    except OSError:
+                        cached_text = None
+                # 兼容老缓存（没有 .txt 记录但当前仍用默认妈妈文案）；改了称谓或兜底文案后自动重新合成
+                if cached_text == self.fallback_text or (cached_text is None and self.fallback_text == legacy_default_text):
+                    with open(path, "rb") as f:
+                        pcm = f.read()
+            if pcm is None:
                 try:
                     pcm = mp3_to_pcm_mono(self.synthesize_mp3(self.fallback_text), rate, gain_db)
-                    with open(path, "wb") as f:
+                    tmp = f"{path}.{os.getpid()}.tmp"
+                    with open(tmp, "wb") as f:
                         f.write(pcm)
+                    os.replace(tmp, path)
+                    tmp_m = f"{meta_path}.{os.getpid()}.tmp"
+                    with open(tmp_m, "w", encoding="utf-8") as mf:
+                        mf.write(self.fallback_text)
+                    os.replace(tmp_m, meta_path)
                 except Exception as exc:
                     sys.stderr.write(f"[fallback] synth failed: {exc}\n")
                     return []

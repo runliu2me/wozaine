@@ -22,8 +22,6 @@
   typo_log.jsonl   派生内容（记忆、日报、故事概括、题目、书）每次修改前后的全文，撤销用
 """
 
-import contextlib
-import fcntl
 import hashlib
 import json
 import os
@@ -34,6 +32,7 @@ import time
 import traceback
 
 import family
+from platform_compat import file_lock
 
 DATA_DIR = os.environ.get("COMPANION_DATA_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "data"))
 BOOK_PATH = os.path.join(DATA_DIR, "typo_book.json")
@@ -71,16 +70,7 @@ _CACHE = {"mtime": None, "book": None, "compiled": None}
 HAN = re.compile(r"[一-鿿]+")
 
 
-# ---------------- 文件锁：多个进程（桥接、管理页、实时页、每晚任务）都会读写 ----------------
-@contextlib.contextmanager
-def file_lock(path):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path + ".lock", "w") as lk:
-        fcntl.flock(lk, fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(lk, fcntl.LOCK_UN)
+# ---------------- 文件锁：见 platform_compat.file_lock（兼容 POSIX fcntl / Windows msvcrt） ----------------
 
 
 def _now():
@@ -274,8 +264,8 @@ def prompt_hint():
         lines.append(s)
     if not lines:
         return ""
-    return ("## 语音识别的常见错字（错字本，家人确认过）\n妈妈那边的文字是语音识别出来的。下面这些写法多半是识别错了，"
-            "理解她的意思时按正确的词理解，不要当成别的人或别的事：\n" + "\n".join(lines))
+    return (f"## 语音识别的常见错字（错字本，家人确认过）\n{family.ELDER_LABEL}那边的文字是语音识别出来的。下面这些写法多半是识别错了，"
+            f"理解{family.ELDER_PRONOUN}的意思时按正确的词理解，不要当成别的人或别的事：\n" + "\n".join(lines))
 
 
 # ---------------- 读音 ----------------
@@ -622,7 +612,9 @@ def _judge_batch(term, variant, batch, model=None):
             ctx_b = raw[a:s] + "【" + term["right"] + "】" + raw[s + len(variant):b]
             lines.append(f"{n}. A：{ctx_a}\n   B：{ctx_b}")
             ids[str(n)] = (k, s)
-    prompt = JUDGE_PROMPT.format(elder_brief=family.ELDER_BRIEF, child=family.CHILD_NAME, wrong=variant, right=term["right"], note=term.get("note") or "一个人名",
+    prompt = family.adapt_prompt(JUDGE_PROMPT).format(
+        elder_brief=family.ELDER_BRIEF, child=family.CHILD_NAME, wrong=variant,
+        right=term["right"], note=term.get("note") or "一个人名",
                                  lines="\n".join(lines))
     raw = deepseek_client._chat([{"role": "user", "content": prompt}], temperature=0.0,
                                 model=model or JUDGE_MODEL, timeout=600).strip()

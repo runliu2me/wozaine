@@ -19,11 +19,11 @@ import family
 # 城市在 family.json 里配置；孩子和老人同城就只查一个
 _E, _C = family.ELDER_CITY, family.CHILD_CITY
 if family.SAME_CITY:
-    PLACES = [(_E["name"], _E["lat"], _E["lon"], f"你和妈妈都在{_E['name']}")]
+    PLACES = [(_E["name"], _E["lat"], _E["lon"], f"你和{family.ELDER_LABEL}都在{_E['name']}")]
 else:
     PLACES = [
         (_C["name"], _C["lat"], _C["lon"], f"你现在在{_C['name']}"),
-        (_E["name"], _E["lat"], _E["lon"], f"妈妈在{_E['name']}"),
+        (_E["name"], _E["lat"], _E["lon"], f"{family.ELDER_LABEL}在{_E['name']}"),
     ]
 CACHE_SECONDS = 20 * 60
 TZ = datetime.timezone(datetime.timedelta(hours=family.TZ_HOURS))
@@ -117,8 +117,8 @@ def schedule_block():
     today = datetime.datetime.now(TZ).strftime("%Y-%m-%d")
     home = family.ELDER_CITY["name"]
     lines = [f"## 你（{family.CHILD_NAME}）的日程（{d.get('range', '')}，同步于 {d.get('synced_at', '')}；今天 {today}）",
-             f"- 妈妈问你最近忙什么、哪天回{home}、在哪儿，就照这里说；没有的事别编。不要主动把日程念给她听，她问到了才说，一次说一两件就够。",
-             f"- 里面有\"{home}\"的就是回家看她；高铁/航班条目说明那天在路上。"]
+             f"- {family.ELDER_LABEL}问你最近忙什么、哪天回{home}、在哪儿，就照这里说；没有的事别编。不要主动把日程念给{family.ELDER_PRONOUN}听，{family.ELDER_PRONOUN}问到了才说，一次说一两件就够。",
+             f"- 里面有\"{home}\"的就是回家看{family.ELDER_PRONOUN}；高铁/航班条目说明那天在路上。"]
     for it in items:
         when = it.get("date", "")
         if it.get("time"):
@@ -141,8 +141,8 @@ def current_context():
     sb = schedule_block()
     if sb:
         lines.append(sb)
-    where = "" if family.SAME_CITY else f"她问你那边就说{_C['name']}的，说她那边就说{_E['name']}的。"
-    lines.append("- 妈妈问几点、今天几号、什么天气，就按上面的直接回答；" + where +
+    where = "" if family.SAME_CITY else f"{family.ELDER_PRONOUN}问你那边就说{_C['name']}的，说{family.ELDER_PRONOUN}那边就说{_E['name']}的。"
+    lines.append(f"- {family.ELDER_LABEL}问几点、今天几号、什么天气，就按上面的直接回答；" + where +
                  "上面没写的事实（比如新闻、别的城市的天气、股票）你就是不知道，老实说“这个我没看”，绝对不能编。")
     return "\n".join(lines)
 

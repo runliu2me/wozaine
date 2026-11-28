@@ -18,7 +18,7 @@
 
 ## 运行时依赖
 
-Python 包见 `requirements.txt`，各自遵循其许可：onnxruntime（MIT）、numpy（BSD-3-Clause）、opuslib（BSD-3-Clause，调用系统的 libopus，BSD-3-Clause）、websockets（BSD-3-Clause）、websocket-client（Apache-2.0）、requests（Apache-2.0）、pypinyin（MIT）、jieba（MIT）。
+Python 包见 `requirements.txt`，各自遵循其许可：onnxruntime（MIT）、numpy（BSD-3-Clause）、opuslib（BSD-3-Clause，调用系统的 libopus，BSD-3-Clause）、websockets（BSD-3-Clause）、websocket-client（Apache-2.0）、requests（Apache-2.0）、pypinyin（MIT）、jieba（MIT）；Windows 平台条件安装 pyogg（BSD-3-Clause，用于提供 `opus.dll`）。
 部署侧常见依赖还包括 FFmpeg（LGPL/GPL，作为外部程序调用，不随仓库分发）、nginx、systemd、certbot、ESP-IDF（Apache-2.0，刷固件时）。
 
 云服务（DeepSeek、阿里云/腾讯云语音识别、MiniMax / CosyVoice）按各家服务条款使用，密钥只放在你自己的服务器上。

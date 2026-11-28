@@ -8,10 +8,11 @@
 
 import json
 import os
+import re
 import threading
 import time
 
-from typo_book import file_lock  # 跨进程文件锁（桥接、管理页、实时页、每晚任务都会写这些文件）
+from platform_compat import file_lock  # 跨进程文件锁（桥接、管理页、实时页、每晚任务都会写这些文件）
 
 DATA_DIR = os.environ.get("COMPANION_DATA_DIR",
                            os.path.join(os.path.dirname(os.path.abspath(__file__)), "data"))
@@ -23,6 +24,36 @@ _LOCK = threading.Lock()
 
 def _ensure_dir():
     os.makedirs(DATA_DIR, exist_ok=True)
+
+
+def _write_json_atomic(path, obj, indent=2):
+    """写临时文件后 os.replace 原子替换，防止中途进程崩溃写空数据文件，并保留原文件权限。"""
+    parent = os.path.dirname(os.path.abspath(path))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    orig_mode = None
+    try:
+        orig_mode = os.stat(path).st_mode & 0o777
+    except OSError:
+        pass
+    tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(obj, f, ensure_ascii=False, indent=indent)
+            f.flush()
+        if orig_mode is not None:
+            try:
+                os.chmod(tmp, orig_mode)
+            except OSError:
+                pass
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def load_facts():
@@ -50,8 +81,7 @@ def add_facts(new_facts):
             facts.append({"text": text, "added_at": time.strftime("%Y-%m-%d %H:%M:%S")})
             existing_text.add(text)
         _ensure_dir()
-        with open(FACTS_PATH, "w", encoding="utf-8") as f:
-            json.dump(facts, f, ensure_ascii=False, indent=2)
+        _write_json_atomic(FACTS_PATH, facts, indent=2)
 
 
 def delete_fact_at(index):
@@ -61,8 +91,7 @@ def delete_fact_at(index):
         if 0 <= index < len(facts):
             facts.pop(index)
             _ensure_dir()
-            with open(FACTS_PATH, "w", encoding="utf-8") as f:
-                json.dump(facts, f, ensure_ascii=False, indent=2)
+            _write_json_atomic(FACTS_PATH, facts, indent=2)
 
 
 def append_history(role, text, audio=None, raw=None):
@@ -206,8 +235,7 @@ def update_fact_at(index, text):
             facts[index]["text"] = text
             facts[index]["edited_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
             _ensure_dir()
-            with open(FACTS_PATH, "w", encoding="utf-8") as f:
-                json.dump(facts, f, ensure_ascii=False, indent=2)
+            _write_json_atomic(FACTS_PATH, facts, indent=2)
 
 
 def replace_facts(texts, backup=True):
@@ -219,32 +247,36 @@ def replace_facts(texts, backup=True):
             shutil.copy2(FACTS_PATH, FACTS_PATH + ".bak-" + time.strftime("%Y%m%d-%H%M%S"))
         now = time.strftime("%Y-%m-%d %H:%M:%S")
         facts = [{"text": t.strip(), "added_at": now} for t in texts if t and t.strip()]
-        with open(FACTS_PATH, "w", encoding="utf-8") as f:
-            json.dump(facts, f, ensure_ascii=False, indent=2)
+        _write_json_atomic(FACTS_PATH, facts, indent=2)
         return facts
 
 
 # ---------------- 每日报告 ----------------
 REPORTS_DIR = os.path.join(DATA_DIR, "reports")
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 def _report_path(date):
+    if not isinstance(date, str) or not _DATE_RE.match(date):
+        return None
     return os.path.join(REPORTS_DIR, f"{date}.json")
 
 
 def save_report(date, text, turns):
+    path = _report_path(date)
+    if not path:
+        raise ValueError(f"非法日期格式: {date!r}")
     os.makedirs(REPORTS_DIR, exist_ok=True)
     payload = {"date": date, "text": text, "turns": turns,
                "generated_at": time.strftime("%Y-%m-%d %H:%M:%S")}
-    with _LOCK:
-        with open(_report_path(date), "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2)
+    with _LOCK, file_lock(path):
+        _write_json_atomic(path, payload, indent=2)
     return payload
 
 
 def load_report(date):
     p = _report_path(date)
-    if not os.path.exists(p):
+    if not p or not os.path.exists(p):
         return None
     with open(p, "r", encoding="utf-8") as f:
         try:

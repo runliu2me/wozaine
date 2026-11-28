@@ -16,6 +16,7 @@ import traceback
 import uuid
 
 import deepseek_client
+import device_gate
 import family
 import memory_store
 
@@ -34,7 +35,7 @@ PHONE_SUFFIX = """
 
 
 def _persona():
-    return family.read_persona() + PHONE_SUFFIX
+    return family.read_persona() + family.adapt_prompt(PHONE_SUFFIX)
 
 
 def _convert(messages):
@@ -61,16 +62,16 @@ def _sse(handler, chunk_obj):
 def handle(handler):
     """在 server.py 的 do_POST 里调用。handler 是 BaseHTTPRequestHandler。"""
     auth = handler.headers.get("Authorization", "")
-    if not PHONE_API_KEY or auth != f"Bearer {PHONE_API_KEY}":
+    if not device_gate.bearer_ok(auth, PHONE_API_KEY):
         handler._send_json(401, {"error": {"message": "unauthorized", "type": "invalid_request_error"}})
         return
     body = handler._read_json_body(max_size=256 * 1024) or {}
     messages = body.get("messages") or []
     stream = bool(body.get("stream"))
-    model_name = body.get("model") or "runrun-phone"
+    model_name = body.get("model") or "wozaine-phone"
     turns, user_text = _convert(messages)
     if not user_text:
-        user_text = "（妈妈刚接通，还没说话）"
+        user_text = f"（{family.ELDER_LABEL}刚接通，还没说话）"
     # 电话里的短期上下文：厂商发来的这通电话的历史 + 我们记录里最近几句（设备上聊过的也算）
     recent = memory_store.recent_history(limit=8) + turns[-10:]
     facts = memory_store.load_facts()

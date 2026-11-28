@@ -12,9 +12,9 @@ import glob
 import json
 import os
 import shutil
-import signal
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 
@@ -24,7 +24,7 @@ sys.path.insert(0, os.path.join(ROOT, "tests"))
 from device_sim import DeviceSim, mp3_to_pcm16k, SR  # noqa: E402
 
 OTA = 4096; WS = 4097; IC = 4098
-TMP = "/tmp/xz-scenarios"
+TMP = os.path.join(tempfile.gettempdir(), "xz-scenarios")
 DEV = "aa:bb:cc:dd:ee:01"
 TOKEN = "test-device-token"
 CTL = "test-ctl-token"
@@ -34,11 +34,13 @@ RESULTS = []
 
 def env_for(faults=""):
     env = {}
-    for line in open(os.path.join(ROOT, ".env"), encoding="utf-8"):
-        line = line.strip()
-        if line and not line.startswith("#") and "=" in line:
-            k, v = line.split("=", 1)
-            env[k] = v
+    env_file = os.path.join(ROOT, ".env")
+    if os.path.exists(env_file):
+        for line in open(env_file, encoding="utf-8"):
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                env[k] = v
     env.update(os.environ)
     env.update({
         "XIAOZHI_OTA_HOST": "127.0.0.1", "XIAOZHI_OTA_PORT": str(OTA),
@@ -58,7 +60,7 @@ def start_bridge(faults=""):
     global BRIDGE
     stop_bridge()
     log = open(os.path.join(TMP, "bridge.log"), "ab")
-    BRIDGE = subprocess.Popen([os.path.join(ROOT, "venv/bin/python3"), "-u", os.path.join(ROOT, "xiaozhi_bridge.py")],
+    BRIDGE = subprocess.Popen([sys.executable, "-u", os.path.join(ROOT, "xiaozhi_bridge.py")],
                               env=env_for(faults), stdout=log, stderr=subprocess.STDOUT, cwd=ROOT)
     for _ in range(100):
         try:
@@ -73,7 +75,7 @@ def start_bridge(faults=""):
 def stop_bridge():
     global BRIDGE
     if BRIDGE and BRIDGE.poll() is None:
-        BRIDGE.send_signal(signal.SIGTERM)
+        BRIDGE.terminate()
         try:
             BRIDGE.wait(5)
         except subprocess.TimeoutExpired:
@@ -351,8 +353,10 @@ def main():
     names = sys.argv[1:] or list(SCENARIOS)
     shutil.rmtree(TMP, ignore_errors=True)
     os.makedirs(os.path.join(TMP, "data"), exist_ok=True)
-    shutil.copytree(os.path.join(ROOT, "data/fallback"), os.path.join(TMP, "data/fallback"), dirs_exist_ok=True)
-    shutil.copy(os.path.join(ROOT, "data/facts.json"), os.path.join(TMP, "data/facts.json"))
+    if os.path.isdir(os.path.join(ROOT, "data", "fallback")):
+        shutil.copytree(os.path.join(ROOT, "data", "fallback"), os.path.join(TMP, "data", "fallback"), dirs_exist_ok=True)
+    if os.path.isfile(os.path.join(ROOT, "data", "facts.json")):
+        shutil.copy(os.path.join(ROOT, "data", "facts.json"), os.path.join(TMP, "data", "facts.json"))
     current_faults = None
     try:
         for n in names:
